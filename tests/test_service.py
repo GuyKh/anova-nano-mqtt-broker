@@ -1,7 +1,7 @@
 """Tests for anova-nano-to-mqtt service."""
 
-import pytest
 import paho.mqtt.client as mqtt
+import pytest
 from pyanova import pyanova
 
 
@@ -53,6 +53,6 @@ def test_anova_nano_connection():
     # and will be skipped if no device is found
     try:
         devices = pa.discover(timeout=2.0)
-        assert len(devices) > 0, "No Anova devices found"
-    except Exception:
+    except (OSError, RuntimeError):
         pytest.skip("No Anova Nano device available for integration test")
+    assert len(devices) > 0, "No Anova devices found"

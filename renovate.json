@@ -1,0 +1,14 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:base"
+  ],
+  "packageRules": [
+    {
+      "matchPackageNames": ["pyanova-nano", "paho-mqtt"],
+      "allowedVersions": ">=0.1.0"
+    }
+  ],
+  "platformAutodetect": true,
+  "autodetect": true
+}

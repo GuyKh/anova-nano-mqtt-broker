@@ -33,13 +33,25 @@ class AnovaMQTTBridge:
     def __init__(self):
         # Configuration from environment variables with defaults
         self.mqtt_broker = os.environ.get("MQTT_BROKER", "mqtt-broker")
-        self.mqtt_port = int(os.environ.get("MQTT_PORT", 1883))
+        try:
+            self.mqtt_port = int(os.environ.get("MQTT_PORT", "1883"))
+        except ValueError:
+            self.mqtt_port = 1883
+            logger.warning("Invalid MQTT_PORT, using default: 1883")
         self.mqtt_user = os.environ.get("MQTT_USER")  # None if not set
         self.mqtt_password = os.environ.get("MQTT_PASSWORD")  # None if not set
         self.mqtt_topic_prefix = os.environ.get("MQTT_TOPIC_PREFIX", "anova/nano")
-        self.scan_timeout = float(os.environ.get("SCAN_TIMEOUT", 5.0))
+        try:
+            self.scan_timeout = float(os.environ.get("SCAN_TIMEOUT", "5.0"))
+        except ValueError:
+            self.scan_timeout = 5.0
+            logger.warning("Invalid SCAN_TIMEOUT, using default: 5.0")
         # min_rssi is optional and not required by spec, but we keep it for completeness
-        self.min_rssi = int(os.environ.get("MIN_RSSI", -100))
+        try:
+            self.min_rssi = int(os.environ.get("MIN_RSSI", "-100"))
+        except ValueError:
+            self.min_rssi = -100
+            logger.warning("Invalid MIN_RSSI, using default: -100")
 
         self.mqtt_client = mqtt.Client()
         self.anova = None
@@ -59,7 +71,7 @@ class AnovaMQTTBridge:
             self.mqtt_client.connect(self.mqtt_broker, self.mqtt_port, 60)
             self.mqtt_client.loop_start()
             logger.info(f"Connected to MQTT broker at {self.mqtt_broker}:{self.mqtt_port}")
-        except Exception as e:
+        except (ConnectionRefusedError, OSError) as e:
             logger.error(f"Failed to connect to MQTT broker: {e}")
             raise
 
@@ -86,7 +98,11 @@ class AnovaMQTTBridge:
         self.anova = pyanova()
 
         # Auto-discover devices
-        devices = self.anova.discover(timeout=self.scan_timeout)
+        try:
+            devices = self.anova.discover(timeout=self.scan_timeout)
+        except (OSError, RuntimeError) as e:
+            logger.error(f"Failed to scan for Anova devices: {e}")
+            return False
 
         if not devices:
             logger.warning("No Anova devices found during scan")
@@ -102,7 +118,7 @@ class AnovaMQTTBridge:
             self.anova.connect_device(device=device)
             logger.info(f"Connected to Anova Nano at {device.address}")
             return True
-        except Exception as e:
+        except (OSError, RuntimeError) as e:
             logger.error(f"Failed to connect to Anova device: {e}")
             return False
 
@@ -162,7 +178,7 @@ class AnovaMQTTBridge:
                 # Small delay between reads
                 await asyncio.sleep(5)
 
-            except Exception as e:
+            except (OSError, RuntimeError) as e:
                 logger.error(f"Error in read loop: {e}")
                 await asyncio.sleep(2)  # Back off before retry
 
