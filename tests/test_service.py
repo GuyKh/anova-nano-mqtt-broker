@@ -1,7 +1,8 @@
 """Tests for anova-nano-to-mqtt service."""
 
-import pytest
 import paho.mqtt.client as mqtt
+import pytest
+
 try:
     from pyanova import pyanova
 except ImportError:
