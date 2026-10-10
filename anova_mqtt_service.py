@@ -16,7 +16,11 @@ import os
 import sys
 
 import paho.mqtt.client as mqtt
-from pyanova import pyanova
+try:
+    from pyanova import pyanova
+except ImportError:
+    # Fallback for different package structure
+    import pyanova_nano as pyanova
 
 # Setup logging
 logging.basicConfig(

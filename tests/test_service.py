@@ -1,8 +1,12 @@
 """Tests for anova-nano-to-mqtt service."""
 
-import paho.mqtt.client as mqtt
 import pytest
-from pyanova import pyanova
+import paho.mqtt.client as mqtt
+try:
+    from pyanova import pyanova
+except ImportError:
+    # Fallback for different package structure
+    import pyanova_nano as pyanova
 
 
 def test_requirements_import():
