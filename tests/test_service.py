@@ -74,8 +74,16 @@ def test_anova_nano_connection():
         # and will be skipped if no device is found
         try:
             devices = loop.run_until_complete(pa.discover(timeout_seconds=2.0))
-        except (OSError, RuntimeError):
-            pytest.skip("No Anova Nano device available for integration test")
+        except Exception as e:
+            # Check if the error is due to no Bluetooth adapter available
+            msg = str(e).lower()
+            if ("org.bluez was not provided" in msg or 
+                "no bluetooth adapter" in msg or 
+                "adapter not found" in msg or
+                "service unknown" in msg):
+                pytest.skip("No Bluetooth adapter available")
+            else:
+                raise
         assert len(devices) > 0, "No Anova devices found"
     finally:
         loop.close()
