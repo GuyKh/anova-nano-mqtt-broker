@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+  mqtt-broker:
+    image: eclipse-mosquitto:2
+    container_name: anova-mqtt-broker
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    restart: unless-stopped
+
+  anova-nano-bridge:
+    build: .
+    container_name: anova-nano-bridge
+    depends_on:
+      - mqtt-broker
+    environment:
+      - MQTT_BROKER=mqtt-broker
+      - MQTT_PORT=1883
+      - ANVA_SCAN_TIMEOUT=5
+    restart: unless-stopped
+    # Bluetooth access for BLE - requires special handling
+    # Option 1: Use with host's Bluetooth (see device config below)
+    # Option 2: Use ESP32 BLE-to-MQTT proxy instead
+    # volumes:
+    #   - /dev/ttyUSB0:/dev/ttyUSB0  # if using serial BLE adapter
+    #   - /var/run/dbus:/var/run/dbus  # if using BlueZ

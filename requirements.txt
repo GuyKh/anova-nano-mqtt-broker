@@ -1,0 +1,2 @@
+pyanova-nano
+paho-mqtt
