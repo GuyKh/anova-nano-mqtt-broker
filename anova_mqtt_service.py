@@ -17,11 +17,17 @@ import sys
 
 import paho.mqtt.client as mqtt
 
+# Import the Pyanova class from the pyanova module (provided by pyanova-nano package)
 try:
-    from pyanova import pyanova
+    from pyanova import Pyanova
 except ImportError:
     # Fallback for different package structure
-    import pyanova_nano as pyanova
+    try:
+        from pyanova_nano import Pyanova
+    except ImportError:
+        # Last resort: import the module and get the class
+        import pyanova_nano
+        Pyanova = pyanova_nano.Pyanova
 
 # Setup logging
 logging.basicConfig(
@@ -100,7 +106,7 @@ class AnovaMQTTBridge:
         logger.info("Scanning for Anova Nano devices...")
 
         # Create pyanova instance
-        self.anova = pyanova()
+        self.anova = Pyanova()
 
         # Auto-discover devices
         try:

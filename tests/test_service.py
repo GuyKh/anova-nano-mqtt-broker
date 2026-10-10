@@ -4,15 +4,20 @@ import paho.mqtt.client as mqtt
 import pytest
 
 try:
-    from pyanova import pyanova
+    from pyanova import Pyanova
 except ImportError:
     # Fallback for different package structure
-    import pyanova_nano as pyanova
+    try:
+        from pyanova_nano import Pyanova
+    except ImportError:
+        # Last resort: import module and get the class
+        import pyanova_nano
+        Pyanova = pyanova_nano.Pyanova
 
 
 def test_requirements_import():
     """Verify core dependencies are importable."""
-    assert pyanova is not None
+    assert Pyanova is not None
     import paho.mqtt.client as mqtt_client
     assert mqtt_client is not None
 
@@ -45,7 +50,7 @@ def test_mqtt_client_creation():
 
 def test_pyanova_instantiation():
     """Verify pyanova can be instantiated."""
-    pa = pyanova()
+    pa = Pyanova()
     assert pa is not None
 
 
@@ -53,7 +58,7 @@ def test_pyanova_instantiation():
 @pytest.mark.integration
 def test_anova_nano_connection():
     """Test Anova Nano connection (requires device)."""
-    pa = pyanova()
+    pa = Pyanova()
     # This test requires an actual Anova Nano device
     # and will be skipped if no device is found
     try:
