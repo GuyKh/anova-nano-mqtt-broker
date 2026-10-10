@@ -12,25 +12,11 @@ Usage:
 
 import asyncio
 import logging
+import os
 import sys
 
 import paho.mqtt.client as mqtt
 from pyanova import pyanova
-
-# Configuration
-CONFIG = {
-    "mqtt": {
-        "broker": "mqtt",
-        "port": 1883,
-        "topic_prefix": "anova/nano",
-        "username": None,
-        "password": None,
-    },
-    "scan": {
-        "timeout": 5.0,  # seconds to scan for devices
-        "min_rssi": -100,  # minimum RSSI to consider a device
-    },
-}
 
 # Setup logging
 logging.basicConfig(
@@ -44,8 +30,17 @@ logger = logging.getLogger("anova-nano-mqtt")
 class AnovaMQTTBridge:
     """Bridge between Anova Nano BLE and MQTT."""
 
-    def __init__(self, config: dict | None = None):
-        self.config = config or CONFIG
+    def __init__(self):
+        # Configuration from environment variables with defaults
+        self.mqtt_broker = os.environ.get("MQTT_BROKER", "mqtt-broker")
+        self.mqtt_port = int(os.environ.get("MQTT_PORT", 1883))
+        self.mqtt_user = os.environ.get("MQTT_USER")  # None if not set
+        self.mqtt_password = os.environ.get("MQTT_PASSWORD")  # None if not set
+        self.mqtt_topic_prefix = os.environ.get("MQTT_TOPIC_PREFIX", "anova/nano")
+        self.scan_timeout = float(os.environ.get("SCAN_TIMEOUT", 5.0))
+        # min_rssi is optional and not required by spec, but we keep it for completeness
+        self.min_rssi = int(os.environ.get("MIN_RSSI", -100))
+
         self.mqtt_client = mqtt.Client()
         self.anova = None
         self.device_address = None
@@ -53,24 +48,17 @@ class AnovaMQTTBridge:
 
     def setup_mqtt(self):
         """Configure and connect MQTT client."""
-        broker = self.config["mqtt"]["broker"]
-        port = self.config["mqtt"]["port"]
-        self.config["mqtt"]["topic_prefix"]
-
         self.mqtt_client.on_connect = self.on_mqtt_connect
         self.mqtt_client.on_publish = self.on_mqtt_publish
         self.mqtt_client.on_disconnect = self.on_mqtt_disconnect
 
-        if self.config["mqtt"]["username"]:
-            self.mqtt_client.username_pw_set(
-                self.config["mqtt"]["username"],
-                self.config["mqtt"]["password"],
-            )
+        if self.mqtt_user:
+            self.mqtt_client.username_pw_set(self.mqtt_user, self.mqtt_password)
 
         try:
-            self.mqtt_client.connect(broker, port, 60)
+            self.mqtt_client.connect(self.mqtt_broker, self.mqtt_port, 60)
             self.mqtt_client.loop_start()
-            logger.info(f"Connected to MQTT broker at {broker}:{port}")
+            logger.info(f"Connected to MQTT broker at {self.mqtt_broker}:{self.mqtt_port}")
         except Exception as e:
             logger.error(f"Failed to connect to MQTT broker: {e}")
             raise
@@ -98,7 +86,7 @@ class AnovaMQTTBridge:
         self.anova = pyanova()
 
         # Auto-discover devices
-        devices = self.anova.discover(timeout=self.config["scan"]["timeout"])
+        devices = self.anova.discover(timeout=self.scan_timeout)
 
         if not devices:
             logger.warning("No Anova devices found during scan")
@@ -120,28 +108,28 @@ class AnovaMQTTBridge:
 
     def publish_status(self, status_data: dict):
         """Publish device status to MQTT."""
-        topic = f"{self.config['mqtt']['topic_prefix']}/status"
+        topic = f"{self.mqtt_topic_prefix}/status"
         payload = str(status_data)
         self.mqtt_client.publish(topic, payload)
         logger.info(f"Published status to {topic}: {payload}")
 
     def publish_temperature(self, temp_data: dict):
         """Publish temperature reading to MQTT."""
-        topic = f"{self.config['mqtt']['topic_prefix']}/temperature"
+        topic = f"{self.mqtt_topic_prefix}/temperature"
         payload = str(temp_data)
         self.mqtt_client.publish(topic, payload)
         logger.info(f"Published temperature to {topic}: {payload}")
 
     def publish_power(self, power_data: dict):
         """Publish power state to MQTT."""
-        topic = f"{self.config['mqtt']['topic_prefix']}/power"
+        topic = f"{self.mqtt_topic_prefix}/power"
         payload = str(power_data)
         self.mqtt_client.publish(topic, payload)
         logger.info(f"Published power state to {topic}: {payload}")
 
     def publish_alert(self, alert_data: dict):
         """Publish alert/warning to MQTT."""
-        topic = f"{self.config['mqtt']['topic_prefix']}/alert"
+        topic = f"{self.mqtt_topic_prefix}/alert"
         payload = str(alert_data)
         self.mqtt_client.publish(topic, payload)
         logger.info(f"Published alert to {topic}: {payload}")

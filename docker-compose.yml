@@ -20,7 +20,10 @@ services:
     environment:
       - MQTT_BROKER=mqtt-broker
       - MQTT_PORT=1883
-      - ANVA_SCAN_TIMEOUT=5
+      - MQTT_USER=
+      - MQTT_PASSWORD=
+      - MQTT_TOPIC_PREFIX=anova/nano
+      - SCAN_TIMEOUT=5
     restart: unless-stopped
     # Bluetooth access for BLE - add host's Bluetooth group to container
     group_add:
