@@ -66,16 +66,26 @@ Edit `mosquitto/config/mosquitto.conf` to adjust MQTT settings (port, password, 
 
 ## Bluetooth Access
 
-The Dockerfile includes BlueZ for direct Bluetooth access. Depending on your host setup,
-you may need:
+The Dockerfile includes BlueZ for direct Bluetooth access. The docker-compose.yml is
+configured to automatically add the host's Bluetooth group to the container:
 
 ```bash
-# Option 1: Add Bluetooth group
-docker compose up -d --group-add bluetooth
-
-# Option 2: Use privileged mode (less secure)
 docker compose up -d
 ```
+
+If your system doesn't support `group_add` in compose, you can use:
+
+```bash
+# Alternative: Manual group addition
+docker compose run --rm --group-add bluetooth anova-nano-bridge
+
+# Or modify docker-compose.yml to add:
+# group_add:
+#   - bluetooth
+```
+
+**Note**: Ensure your user is in the `bluetooth` group on the host system for proper
+device access, or run with appropriate privileges.
 
 ## Alternative: ESP32 BLE→MQTT Proxy
 

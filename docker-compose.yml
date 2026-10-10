@@ -22,9 +22,11 @@ services:
       - MQTT_PORT=1883
       - ANVA_SCAN_TIMEOUT=5
     restart: unless-stopped
-    # Bluetooth access for BLE - requires special handling
-    # Option 1: Use with host's Bluetooth (see device config below)
-    # Option 2: Use ESP32 BLE-to-MQTT proxy instead
-    # volumes:
-    #   - /dev/ttyUSB0:/dev/ttyUSB0  # if using serial BLE adapter
-    #   - /var/run/dbus:/var/run/dbus  # if using BlueZ
+    # Bluetooth access for BLE - add host's Bluetooth group to container
+    group_add:
+      - bluetooth
+    # Alternative options if group_add doesn't work on your system:
+    # privileged: true  # Less secure, not recommended
+    # devices:
+    #   - "/dev/rfcomm0:/dev/rfcomm0"  # Direct device access
+    #   - "/var/run/dbus:/var/run/dbus"  # DBus access for BlueZ
