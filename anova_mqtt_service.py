@@ -16,18 +16,17 @@ import os
 import sys
 
 import paho.mqtt.client as mqtt
-
-# Import the Pyanova class from the pyanova module (provided by pyanova-nano package)
+# Import the PyAnova class from the pyanova_nano package
 try:
-    from pyanova import Pyanova
+    from pyanova_nano import PyAnova as Pyanova
 except ImportError:
-    # Fallback for different package structure
+    # Fallback: try to import from pyanova module (in case of different packaging)
     try:
-        from pyanova_nano import Pyanova
+        from pyanova import PyAnova as Pyanova
     except ImportError:
-        # Last resort: import the module and get the class
+        # Last resort: import modules and access the class
         import pyanova_nano
-        Pyanova = pyanova_nano.Pyanova
+        Pyanova = pyanova_nano.PyAnova
 
 # Setup logging
 logging.basicConfig(

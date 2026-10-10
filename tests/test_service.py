@@ -1,18 +1,19 @@
 """Tests for anova-nano-to-mqtt service."""
 
+import asyncio
 import paho.mqtt.client as mqtt
 import pytest
 
 try:
-    from pyanova import Pyanova
+    from pyanova_nano import PyAnova as Pyanova
 except ImportError:
-    # Fallback for different package structure
+    # Fallback: try to import from pyanova module (in case of different packaging)
     try:
-        from pyanova_nano import Pyanova
+        from pyanova import PyAnova as Pyanova
     except ImportError:
-        # Last resort: import module and get the class
+        # Last resort: import modules and access the class
         import pyanova_nano
-        Pyanova = pyanova_nano.Pyanova
+        Pyanova = pyanova_nano.PyAnova
 
 
 def test_requirements_import():
@@ -50,19 +51,31 @@ def test_mqtt_client_creation():
 
 def test_pyanova_instantiation():
     """Verify pyanova can be instantiated."""
-    pa = Pyanova()
-    assert pa is not None
+    # Create event loop for pyanova initialization
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        pa = Pyanova(loop=loop)
+        assert pa is not None
+    finally:
+        loop.close()
 
 
 # Integration-style test (requires actual Anova Nano device)
 @pytest.mark.integration
 def test_anova_nano_connection():
     """Test Anova Nano connection (requires device)."""
-    pa = Pyanova()
-    # This test requires an actual Anova Nano device
-    # and will be skipped if no device is found
+    # Create event loop for pyanova initialization
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        devices = pa.discover(timeout=2.0)
-    except (OSError, RuntimeError):
-        pytest.skip("No Anova Nano device available for integration test")
-    assert len(devices) > 0, "No Anova devices found"
+        pa = Pyanova(loop=loop)
+        # This test requires an actual Anova Nano device
+        # and will be skipped if no device is found
+        try:
+            devices = loop.run_until_complete(pa.discover(timeout_seconds=2.0))
+        except (OSError, RuntimeError):
+            pytest.skip("No Anova Nano device available for integration test")
+        assert len(devices) > 0, "No Anova devices found"
+    finally:
+        loop.close()
