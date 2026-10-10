@@ -12,9 +12,7 @@ Usage:
 
 import asyncio
 import logging
-import signal
 import sys
-from pathlib import Path
 
 import paho.mqtt.client as mqtt
 from pyanova import pyanova
@@ -46,7 +44,7 @@ logger = logging.getLogger("anova-nano-mqtt")
 class AnovaMQTTBridge:
     """Bridge between Anova Nano BLE and MQTT."""
 
-    def __init__(self, config: dict = None):
+    def __init__(self, config: dict | None = None):
         self.config = config or CONFIG
         self.mqtt_client = mqtt.Client()
         self.anova = None
@@ -57,7 +55,7 @@ class AnovaMQTTBridge:
         """Configure and connect MQTT client."""
         broker = self.config["mqtt"]["broker"]
         port = self.config["mqtt"]["port"]
-        topic_prefix = self.config["mqtt"]["topic_prefix"]
+        self.config["mqtt"]["topic_prefix"]
 
         self.mqtt_client.on_connect = self.on_mqtt_connect
         self.mqtt_client.on_publish = self.on_mqtt_publish
@@ -124,28 +122,28 @@ class AnovaMQTTBridge:
         """Publish device status to MQTT."""
         topic = f"{self.config['mqtt']['topic_prefix']}/status"
         payload = str(status_data)
-        result = self.mqtt_client.publish(topic, payload)
+        self.mqtt_client.publish(topic, payload)
         logger.info(f"Published status to {topic}: {payload}")
 
     def publish_temperature(self, temp_data: dict):
         """Publish temperature reading to MQTT."""
         topic = f"{self.config['mqtt']['topic_prefix']}/temperature"
         payload = str(temp_data)
-        result = self.mqtt_client.publish(topic, payload)
+        self.mqtt_client.publish(topic, payload)
         logger.info(f"Published temperature to {topic}: {payload}")
 
     def publish_power(self, power_data: dict):
         """Publish power state to MQTT."""
         topic = f"{self.config['mqtt']['topic_prefix']}/power"
         payload = str(power_data)
-        result = self.mqtt_client.publish(topic, payload)
+        self.mqtt_client.publish(topic, payload)
         logger.info(f"Published power state to {topic}: {payload}")
 
     def publish_alert(self, alert_data: dict):
         """Publish alert/warning to MQTT."""
         topic = f"{self.config['mqtt']['topic_prefix']}/alert"
         payload = str(alert_data)
-        result = self.mqtt_client.publish(topic, payload)
+        self.mqtt_client.publish(topic, payload)
         logger.info(f"Published alert to {topic}: {payload}")
 
     async def read_loop(self):

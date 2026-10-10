@@ -1,15 +1,14 @@
 """Tests for anova-nano-to-mqtt service."""
 
 import pytest
-from pyanova import pyanova
 import paho.mqtt.client as mqtt
+from pyanova import pyanova
 
 
 def test_requirements_import():
     """Verify core dependencies are importable."""
-    import pyanova
-    import paho.mqtt.client as mqtt_client
     assert pyanova is not None
+    import paho.mqtt.client as mqtt_client
     assert mqtt_client is not None
 
 
@@ -49,8 +48,6 @@ def test_pyanova_instantiation():
 @pytest.mark.integration
 def test_anova_nano_connection():
     """Test Anova Nano connection (requires device)."""
-    import asyncio
-    
     pa = pyanova()
     # This test requires an actual Anova Nano device
     # and will be skipped if no device is found

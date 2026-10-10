@@ -1,0 +1,19 @@
+[project]
+name = "anova-nano-to-mqtt"
+version = "0.1.0"
+description = "Bridge Anova Nano BLE events to MQTT"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pyanova-nano>=0.1.0",
+    "paho-mqtt>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
