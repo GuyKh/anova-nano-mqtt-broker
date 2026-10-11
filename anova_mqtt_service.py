@@ -126,7 +126,7 @@ class AnovaMQTTBridge:
 
         # Connect to the device
         try:
-            self.anova.connect(device=device)
+            await self.anova.connect(device=device)
             logger.info(f"Connected to Anova Nano at {device.address}")
             return True
         except (OSError, RuntimeError) as e:
@@ -168,7 +168,7 @@ class AnovaMQTTBridge:
         while self.running:
             try:
                 # Get current status
-                status = self.anova.get_status()
+                status = await self.anova.get_status()
                 logger.debug(f"Got status: {status}")
 
                 # Publish various data points
@@ -213,7 +213,7 @@ class AnovaMQTTBridge:
         finally:
             self.running = False
             if self.anova:
-                self.anova.disconnect()
+                await self.anova.disconnect()
             self.mqtt_client.loop_stop()
             self.mqtt_client.disconnect()
             logger.info("Bridge shutdown complete")
