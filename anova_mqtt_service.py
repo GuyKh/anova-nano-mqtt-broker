@@ -101,7 +101,7 @@ class AnovaMQTTBridge:
         """Callback when MQTT disconnects."""
         logger.warning(f"MQTT disconnected with code: {rc}")
 
-    def get_anova_device(self):
+    async def get_anova_device(self):
         """Discover and connect to Anova Nano device."""
         logger.info("Scanning for Anova Nano devices...")
 
