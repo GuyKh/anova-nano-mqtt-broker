@@ -170,12 +170,11 @@ class AnovaMQTTBridge:
             try:
                 # Get current status
                 status = await self.anova.get_status()
-                logger.debug(f"Got status: {status}")
+                logger.info("Status details: temperature=%s, power=%s, is_cooking=%s" % (getattr(status, "temperature", "N/A"), getattr(status, "power", "N/A"), getattr(status, "is_cooking", "N/A")))
                 logger.debug(f"Status type: {type(status)}")
                 logger.debug(f"Status dir: {[attr for attr in dir(status) if not attr.startswith("_")]}")
                 logger.debug(f"Status dict: {status.__dict__ if hasattr(status, "__dict__") else "No __dict__"}")
                 logger.info(f"Status details: temperature={getattr(status, "temperature", "N/A"), power={getattr(status, "power", "N/A")}, is_cooking={getattr(status, "is_cooking", "N/A")}")
-
                 # Publish various data points
                 if hasattr(status, "temperature"):
                     self.publish_temperature(
