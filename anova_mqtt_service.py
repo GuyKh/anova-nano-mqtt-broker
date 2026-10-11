@@ -110,7 +110,7 @@ class AnovaMQTTBridge:
 
         # Auto-discover devices
         try:
-            devices = self.anova.discover(timeout_seconds=self.scan_timeout)
+            devices = await self.anova.discover(timeout_seconds=self.scan_timeout)
         except (OSError, RuntimeError) as e:
             logger.error(f"Failed to scan for Anova devices: {e}")
             return False
