@@ -126,7 +126,7 @@ class AnovaMQTTBridge:
 
         # Connect to the device
         try:
-            self.anova.connect_device(device=device)
+            self.anova.connect(device=device)
             logger.info(f"Connected to Anova Nano at {device.address}")
             return True
         except (OSError, RuntimeError) as e:
