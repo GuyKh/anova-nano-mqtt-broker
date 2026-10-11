@@ -201,7 +201,7 @@ class AnovaMQTTBridge:
         self.setup_mqtt()
 
         # Connect to Anova Nano
-        if not self.get_anova_device():
+        if not await self.get_anova_device():
             logger.error("Failed to connect to Anova Nano. Exiting.")
             return
 
