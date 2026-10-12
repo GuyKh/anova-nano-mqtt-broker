@@ -1,28 +1,16 @@
-FROM python:3.12-alpine
+FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system dependencies for BLE
-# Alpine packages for bluez and development headers
-RUN apk add --no-cache \
-    bluez \
-    bluez-dev \
-    gcc \
-    musl-dev \
-    python3-dev \
-    && rm -rf /var/cache/apk/*
-
-# Install Python dependencies
+# bleak talks to the host's BlueZ over D-Bus (socket mounted by docker compose);
+# no Bluetooth packages are needed inside the image.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
 COPY anova_mqtt_service.py .
 
-# Create a non-root user for security
-RUN addgroup -g 1000 appgroup && \
-    adduser -D -u 1000 -G appgroup appuser
-USER appuser
+ENV PYTHONUNBUFFERED=1
 
-# Default command
+# Runs as root: BlueZ's D-Bus policy only lets root (or the host's "bluetooth"
+# group) talk to org.bluez. See README "Bluetooth access" for running unprivileged.
 CMD ["python", "anova_mqtt_service.py"]

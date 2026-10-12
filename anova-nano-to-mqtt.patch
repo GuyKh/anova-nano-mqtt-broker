@@ -1,0 +1,2022 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 9f6f3a5..e562501 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -2,36 +2,45 @@ name: CI
+ 
+ on:
+   push:
+-    branches: [ main ]
++    branches: [main]
+   pull_request:
+-    branches: [ main ]
++  workflow_dispatch:
+ 
+ jobs:
+   test:
+     runs-on: ubuntu-latest
+-    
++    strategy:
++      matrix:
++        python-version: ["3.11", "3.12", "3.13"]
+     steps:
+-    - uses: actions/checkout@v4
+-    
+-    - name: Set up Python
+-      uses: actions/setup-python@v5
+-      with:
+-        python-version: "3.12"
+-    
+-    - name: Install dependencies
+-      run: |
+-        python -m pip install --upgrade pip
+-        pip install -r requirements.txt
+-        pip install pytest ruff mypy
+-    
+-    - name: Lint with ruff
+-      run: |
+-        ruff check .
+-    
+-    - name: Type check with mypy
+-      run: |
+-        mypy anova_mqtt_service.py --ignore-missing-imports
+-    
+-    - name: Run tests
+-      run: |
+-        PYTHONPATH=. pytest tests/ -v
+\ No newline at end of file
++      - uses: actions/checkout@v4
++      - uses: actions/setup-python@v5
++        with:
++          python-version: ${{ matrix.python-version }}
++      - name: Install
++        run: |
++          python -m pip install --upgrade pip
++          pip install -r requirements.txt pytest ruff mypy
++      - name: Lint
++        run: |
++          ruff check .
++          ruff format --check .
++      - name: Type check
++        run: mypy anova_mqtt_service.py
++      - name: Test
++        run: pytest -v
++
++  docker:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: docker/setup-buildx-action@v3
++      - name: Build image
++        uses: docker/build-push-action@v6
++        with:
++          context: .
++          push: false
++          tags: anova-nano-to-mqtt:ci
++          load: true
++      - name: Smoke test (module imports inside the image)
++        run: docker run --rm anova-nano-to-mqtt:ci python -c "import anova_mqtt_service"
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index e784046..3eab791 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -17,6 +17,9 @@ jobs:
+       - name: Checkout repository
+         uses: actions/checkout@v4
+ 
++      - name: Set up QEMU
++        uses: docker/setup-qemu-action@v3
++
+       - name: Set up Docker Buildx
+         uses: docker/setup-buildx-action@v3
+ 
+@@ -33,17 +36,18 @@ jobs:
+         with:
+           images: ghcr.io/${{ github.repository }}
+           tags: |
+-            type=ref,event=branch
+-            type=ref,event=pr
+             type=semver,pattern={{version}}
+             type=semver,pattern={{major}}.{{minor}}
+             type=semver,pattern={{major}}
+             type=sha
++            type=raw,value=latest
+ 
+       - name: Build and push Docker image
+-        uses: docker/build-push-action@v5
++        uses: docker/build-push-action@v6
+         with:
+           context: .
++          # Raspberry Pis are the usual BLE host
++          platforms: linux/amd64,linux/arm64
+           push: true
+           tags: ${{ steps.meta.outputs.tags }}
+           labels: ${{ steps.meta.outputs.labels }}
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..ce36007
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,13 @@
++__pycache__/
++*.pyc
++.pytest_cache/
++.mypy_cache/
++.ruff_cache/
++*.egg-info/
++dist/
++build/
++.venv/
++
++# Mosquitto runtime data
++mosquitto/data/
++mosquitto/log/
+diff --git a/Dockerfile b/Dockerfile
+index 7c6b0b2..f149a6d 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,28 +1,16 @@
+-FROM python:3.12-alpine
++FROM python:3.12-slim
+ 
+ WORKDIR /app
+ 
+-# Install system dependencies for BLE
+-# Alpine packages for bluez and development headers
+-RUN apk add --no-cache \
+-    bluez \
+-    bluez-dev \
+-    gcc \
+-    musl-dev \
+-    python3-dev \
+-    && rm -rf /var/cache/apk/*
+-
+-# Install Python dependencies
++# bleak talks to the host's BlueZ over D-Bus (socket mounted by docker compose);
++# no Bluetooth packages are needed inside the image.
+ COPY requirements.txt .
+ RUN pip install --no-cache-dir -r requirements.txt
+ 
+-# Copy application code
+ COPY anova_mqtt_service.py .
+ 
+-# Create a non-root user for security
+-RUN addgroup -g 1000 appgroup && \
+-    adduser -D -u 1000 -G appgroup appuser
+-USER appuser
++ENV PYTHONUNBUFFERED=1
+ 
+-# Default command
+-CMD ["python", "anova_mqtt_service.py"]
+\ No newline at end of file
++# Runs as root: BlueZ's D-Bus policy only lets root (or the host's "bluetooth"
++# group) talk to org.bluez. See README "Bluetooth access" for running unprivileged.
++CMD ["python", "anova_mqtt_service.py"]
+diff --git a/README.md b/README.md
+index 621b4e7..b333a2f 100644
+--- a/README.md
++++ b/README.md
+@@ -1,117 +1,123 @@
+ # anova-nano-to-mqtt
+ 
+-Docker service that sends Anova Nano BLE events to MQTT.
++Bridges an **Anova Nano** sous vide cooker (Bluetooth LE) to MQTT, with Home Assistant auto-discovery.
+ 
+-## Overview
+-
+-This project bridges the Anova Nano sous vide cooker (via Bluetooth LE) with an MQTT broker,
+-allowing you to receive Anova Nano events (temperature, power status, alerts) in any MQTT
+-compatible system (Home Assistant, Node-RED, etc.).
+-
+-## Architecture
++All device communication goes through [pyanova-nano](https://github.com/filmkorn/pyanova-nano). This service only maps its API onto MQTT topics.
+ 
+ ```
+-Anova Nano (BLE) → Python Service → MQTT Broker → Consumers
++Anova Nano ⇄ BLE ⇄ host BlueZ ⇄ D-Bus ⇄ bridge (pyanova-nano) ⇄ MQTT ⇄ Home Assistant / Node-RED / …
+ ```
+ 
+-The Python service uses:
+-- `pyanova-nano` for BLE communication with the Anova Nano
+-- `paho-mqtt` for MQTT publishing
+-- `blueZ` system libraries for Bluetooth access (included in Dockerfile)
+-
+-## MQTT Topics
+-
+-| Topic | Description |
+-|-------|-------------|
+-| `anova/nano/status` | General device status |
+-| `anova/nano/temperature` | Current cooking temperature |
+-| `anova/nano/power` | Power state and cooking status |
+-| `anova/nano/alert` | Alerts and warnings |
+-
+-## Project Structure
++## Quick start
+ 
++```bash
++docker compose up -d
++docker compose logs -f anova-nano-bridge
+ ```
+-anova-nano-to-mqtt/
+-├── Dockerfile              # Python 3.12-slim with BlueZ
+-├── requirements.txt        # pyanova-nano + paho-mqtt
+-├── anova_mqtt_service.py   # Main bridge script
+-├── docker-compose.yml      # Mosquitto + bridge services
+-├── mosquitto/config/       # MQTT broker configuration
+-└── README.md              # This file
++
++The Nano accepts only one BLE connection. Close the Anova app (or turn off Bluetooth on your phone) before starting the bridge.
++
++On first start the bridge scans for the cooker. Once you know its address (it's in the logs), set `DEVICE_ADDRESS` so the bridge connects directly.
++
++## MQTT topics
++
++With the default prefix `anova/nano`:
++
++| Topic | Direction | Payload |
++|---|---|---|
++| `anova/nano/availability` | out, retained | `online` / `offline` (also the MQTT last will) |
++| `anova/nano/state` | out, retained | JSON, see below |
++| `anova/nano/info` | out, retained | JSON: `address`, `firmware_version`, `firmware_commit`, `firmware_date`, `device_info` |
++| `anova/nano/set/power` | in | `ON` / `OFF` (also `start`/`stop`, `true`/`false`, `1`/`0`) |
++| `anova/nano/set/mode` | in | `heat` / `off` (Home Assistant climate) |
++| `anova/nano/set/target_temperature` | in | number, **in the cooker's current unit** (like `PyAnova.set_target_temperature`) |
++| `anova/nano/set/timer` | in | whole minutes, 0–5999 |
++| `anova/nano/set/unit` | in | `C` / `F` |
++
++Example `state` payload:
++
++```json
++{
++  "water_temp": 58.23, "water_temp_units": "C",
++  "heater_temp": 61.1, "heater_temp_units": "C",
++  "triac_temp": 45.12, "triac_temp_units": "C",
++  "internal_temp": 35.05, "internal_temp_units": "C",
++  "water_low": false, "water_leak": false, "motor_speed": 1800,
++  "target_temperature": 60.0, "unit": "C", "timer": 90,
++  "running": true, "status": "running"
++}
+ ```
+ 
+-## Usage
++This contains every field of pyanova-nano's `SensorValues`, plus the results of `get_target_temperature()`, `get_unit()`, `get_timer()` and `get_status()`.
+ 
+-### Start the services
++Command handling:
+ 
+-```bash
+-cd anova-nano-to-mqtt
+-docker compose up -d
+-```
++- Invalid commands (out-of-range temperature, bad payload) are rejected and logged, never sent to the cooker.
++- After each accepted command the state is refreshed immediately.
++- Commands that arrive while the cooker is offline are **dropped, not replayed**. A `start` should not fire hours later when the cooker comes back in range.
+ 
+-### View logs
++## Home Assistant
+ 
+-```bash
+-docker compose logs -f anova-nano-bridge
+-```
++With `HA_DISCOVERY=true` (the default) the bridge publishes discovery configs for one device. That device has:
+ 
+-### First run
++- a climate entity (heat/off, target, current temperature)
++- a "Cooking" switch
++- water, heater, triac and internal temperature sensors, plus motor speed and timer remaining
++- water low and water leak binary sensors
++- a cooking timer number
++- a display unit select
+ 
+-On first run, the service will scan for your Anova Nano device and connect via BLE.
+-Ensure your Anova Nano is in pairing mode and within Bluetooth range.
++Discovery is re-sent when Home Assistant restarts (`homeassistant/status`) and whenever the cooker's unit changes.
+ 
+ ## Configuration
+ 
+-Edit `mosquitto/config/mosquitto.conf` to adjust MQTT settings (port, password, etc.).
++All configuration is via environment variables:
+ 
+-## Bluetooth Access
++| Variable | Default | Description |
++|---|---|---|
++| `MQTT_BROKER` | `mqtt-broker` | Broker host |
++| `MQTT_PORT` | `1883` | Broker port |
++| `MQTT_USER` / `MQTT_PASSWORD` | unset | Credentials |
++| `MQTT_CLIENT_ID` | `anova-nano-bridge` | MQTT client id |
++| `MQTT_TOPIC_PREFIX` | `anova/nano` | Topic prefix |
++| `DEVICE_ADDRESS` | unset | BLE MAC of the cooker. If unset, the first Nano found is used |
++| `SCAN_TIMEOUT` | `10` | Seconds to scan / look for the device |
++| `POLL_INTERVAL` | `30` | Seconds between state polls (PyAnova's default) |
++| `RECONNECT_MIN` / `RECONNECT_MAX` | `5` / `300` | BLE reconnect backoff bounds, seconds |
++| `HA_DISCOVERY` | `true` | Publish Home Assistant discovery |
++| `HA_DISCOVERY_PREFIX` | `homeassistant` | Discovery prefix |
++| `DEVICE_NAME` | `Anova Nano` | Device name in Home Assistant |
++| `LOG_LEVEL` | `INFO` | `DEBUG` shows every state poll |
+ 
+-The Dockerfile includes BlueZ for direct Bluetooth access. The docker-compose.yml is
+-configured to automatically add the host's Bluetooth group to the container:
++## Bluetooth access
+ 
+-```bash
+-docker compose up -d
+-```
++bleak uses the **host's** BlueZ over the system D-Bus. The container needs two things:
+ 
+-If your system doesn't support `group_add` in compose, you can use:
++1. The host's D-Bus socket. `docker-compose.yml` mounts `/var/run/dbus`.
++2. Permission to talk to `org.bluez`. BlueZ's default D-Bus policy allows root and members of the host's `bluetooth` group, so the image runs as root. No `privileged` mode or device passthrough is needed.
+ 
+-```bash
+-# Alternative: Manual group addition
+-docker compose run --rm --group-add bluetooth anova-nano-bridge
++To run unprivileged instead, run the container as a host user that is in the `bluetooth` group. D-Bus checks group membership of the host uid. For example:
+ 
+-# Or modify docker-compose.yml to add:
+-# group_add:
+-#   - bluetooth
++```yaml
++    user: "1000:1000"   # a host user that is in the bluetooth group
+ ```
+ 
+-**Note**: Ensure your user is in the `bluetooth` group on the host system for proper
+-device access, or run with appropriate privileges.
+-
+-## Alternative: ESP32 BLE→MQTT Proxy
++The host needs a working Bluetooth adapter with `bluetoothd` running (`systemctl status bluetooth`).
+ 
+-If you prefer not to give Docker access to Bluetooth hardware, use an ESP32 running
+-[Tasmota/ESPHome BLE proxy] to forward BLE advertisements to MQTT without BlueZ.
+-
+-## Development
+-
+-### Running Locally (without Docker)
++## Running without Docker
+ 
+ ```bash
+-# Install dependencies
+-pip install -r requirements.txt
+-
+-# Run the service
+-python anova_mqtt_service.py
++pip install .
++anova-nano-to-mqtt          # or: python anova_mqtt_service.py
+ ```
+ 
+-### Testing
+-
+-Run the test suite:
++## Development
+ 
+ ```bash
+-pytest
++pip install -r requirements.txt pytest ruff mypy
++ruff check . && ruff format --check .
++mypy anova_mqtt_service.py
++pytest -v
+ ```
+ 
+-## License
+-
+-MIT
+\ No newline at end of file
++The tests run the bridge end to end against fake MQTT and BLE clients. They also check that every `PyAnova` method the bridge calls exists on the real class, so an upstream API change fails CI.
+diff --git a/anova_mqtt_service.py b/anova_mqtt_service.py
+index bc78cad..6da8040 100755
+--- a/anova_mqtt_service.py
++++ b/anova_mqtt_service.py
+@@ -1,236 +1,654 @@
+ #!/usr/bin/env python3
+-"""Anova Nano BLE to MQTT Bridge Service.
++"""Anova Nano BLE <-> MQTT bridge.
+ 
+-Uses pyanova-nano to connect to Anova Nano via BLE and publish
+-sensor events to an MQTT broker.
++Uses pyanova-nano (https://github.com/filmkorn/pyanova-nano) for all device
++communication; this module only maps PyAnova's API onto MQTT topics.
++
++Topics (prefix defaults to ``anova/nano``):
++
++    <prefix>/availability        "online" / "offline" (retained, LWT)
++    <prefix>/state               JSON device state (retained), see build_state()
++    <prefix>/info                JSON firmware/device info (retained)
++    <prefix>/set/power           ON|OFF (also start|stop, heat|off, true|false, 1|0)
++    <prefix>/set/mode            heat|off (Home Assistant climate mode)
++    <prefix>/set/target_temperature   float, in the cooker's current unit
++    <prefix>/set/timer           integer minutes
++    <prefix>/set/unit            C|F
+ 
+ Usage:
+     docker compose up -d
+-    # or run directly:
++    # or:
+     python anova_mqtt_service.py
+ """
+ 
++from __future__ import annotations
++
+ import asyncio
++import contextlib
++import dataclasses
++import json
+ import logging
+ import os
+ import sys
++from collections.abc import Callable
++from dataclasses import dataclass
++from typing import Any
+ 
+ import paho.mqtt.client as mqtt
++from paho.mqtt.enums import CallbackAPIVersion
++from pyanova_nano import PyAnova
++from pyanova_nano.types import ReadCommands, SensorValues
+ 
+-# Import the PyAnova class from the pyanova_nano package
+-try:
+-    from pyanova_nano import PyAnova as Pyanova
+-except ImportError:
+-    # Fallback: try to import from pyanova module (in case of different packaging)
+-    try:
+-        from pyanova import PyAnova as Pyanova
+-    except ImportError:
+-        # Last resort: import modules and access the class
+-        import pyanova_nano
+-        Pyanova = pyanova_nano.PyAnova
+-
+-# Setup logging
+-logging.basicConfig(
+-    level=logging.INFO,
+-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+-    handlers=[logging.StreamHandler(sys.stdout)],
+-)
+ logger = logging.getLogger("anova-nano-mqtt")
+ 
++# Anova Nano setpoint range (32-197 °F / 0-92 °C), in the cooker's current unit.
++TEMPERATURE_RANGE = {"C": (0.0, 92.0), "F": (32.0, 197.0)}
++TIMER_MAX_MINUTES = 5999  # 99 h 59 min
+ 
+-class AnovaMQTTBridge:
+-    """Bridge between Anova Nano BLE and MQTT."""
++_TRUE = {"on", "true", "1", "start", "heat", "yes"}
++_FALSE = {"off", "false", "0", "stop", "no"}
+ 
+-    def __init__(self):
+-        # Configuration from environment variables with defaults
+-        self.mqtt_broker = os.environ.get("MQTT_BROKER", "mqtt-broker")
+-        try:
+-            self.mqtt_port = int(os.environ.get("MQTT_PORT", "1883"))
+-        except ValueError:
+-            self.mqtt_port = 1883
+-            logger.warning("Invalid MQTT_PORT, using default: 1883")
+-        self.mqtt_user = os.environ.get("MQTT_USER")  # None if not set
+-        self.mqtt_password = os.environ.get("MQTT_PASSWORD")  # None if not set
+-        self.mqtt_topic_prefix = os.environ.get("MQTT_TOPIC_PREFIX", "anova/nano")
+-        try:
+-            self.scan_timeout = float(os.environ.get("SCAN_TIMEOUT", "5.0"))
+-        except ValueError:
+-            self.scan_timeout = 5.0
+-            logger.warning("Invalid SCAN_TIMEOUT, using default: 5.0")
+-        # min_rssi is optional and not required by spec, but we keep it for completeness
+-        try:
+-            self.min_rssi = int(os.environ.get("MIN_RSSI", "-100"))
+-        except ValueError:
+-            self.min_rssi = -100
+-            logger.warning("Invalid MIN_RSSI, using default: -100")
+ 
+-        self.mqtt_client = mqtt.Client()
+-        self.anova = None
+-        self.device_address = None
+-        self.running = False
++# ---------------------------------------------------------------------------
++# Configuration
++# ---------------------------------------------------------------------------
+ 
+-    def setup_mqtt(self):
+-        """Configure and connect MQTT client."""
+-        self.mqtt_client.on_connect = self.on_mqtt_connect
+-        self.mqtt_client.on_publish = self.on_mqtt_publish
+-        self.mqtt_client.on_disconnect = self.on_mqtt_disconnect
+ 
+-        if self.mqtt_user:
+-            self.mqtt_client.username_pw_set(self.mqtt_user, self.mqtt_password)
++def _env_str(name: str, default: str | None = None) -> str | None:
++    value = os.environ.get(name)
++    return value if value not in (None, "") else default
+ 
++
++def _env_num(name: str, default: float, cast: Callable[[str], Any] = float) -> Any:
++    raw = _env_str(name)
++    if raw is None:
++        return cast(str(default))
++    try:
++        return cast(raw)
++    except ValueError:
++        logger.warning("Invalid %s=%r, using default %s", name, raw, default)
++        return cast(str(default))
++
++
++def _env_bool(name: str, default: bool) -> bool:
++    raw = _env_str(name)
++    if raw is None:
++        return default
++    if raw.lower() in _TRUE:
++        return True
++    if raw.lower() in _FALSE:
++        return False
++    logger.warning("Invalid %s=%r, using default %s", name, raw, default)
++    return default
++
++
++@dataclass(frozen=True)
++class Config:
++    mqtt_broker: str = "mqtt-broker"
++    mqtt_port: int = 1883
++    mqtt_user: str | None = None
++    mqtt_password: str | None = None
++    mqtt_client_id: str = "anova-nano-bridge"
++    topic_prefix: str = "anova/nano"
++    device_address: str | None = None  # BLE MAC; discover if unset
++    scan_timeout: float = 10.0
++    poll_interval: float = 30.0  # PyAnova's default poll interval
++    reconnect_min: float = 5.0
++    reconnect_max: float = 300.0
++    ha_discovery: bool = True
++    ha_discovery_prefix: str = "homeassistant"
++    device_name: str = "Anova Nano"
++
++    @classmethod
++    def from_env(cls) -> Config:
++        return cls(
++            mqtt_broker=_env_str("MQTT_BROKER", cls.mqtt_broker) or cls.mqtt_broker,
++            mqtt_port=_env_num("MQTT_PORT", cls.mqtt_port, int),
++            mqtt_user=_env_str("MQTT_USER"),
++            mqtt_password=_env_str("MQTT_PASSWORD"),
++            mqtt_client_id=_env_str("MQTT_CLIENT_ID", cls.mqtt_client_id)
++            or cls.mqtt_client_id,
++            topic_prefix=(
++                _env_str("MQTT_TOPIC_PREFIX", cls.topic_prefix) or cls.topic_prefix
++            ).rstrip("/"),
++            device_address=_env_str("DEVICE_ADDRESS"),
++            scan_timeout=_env_num("SCAN_TIMEOUT", cls.scan_timeout),
++            poll_interval=max(1.0, _env_num("POLL_INTERVAL", cls.poll_interval)),
++            reconnect_min=_env_num("RECONNECT_MIN", cls.reconnect_min),
++            reconnect_max=_env_num("RECONNECT_MAX", cls.reconnect_max),
++            ha_discovery=_env_bool("HA_DISCOVERY", cls.ha_discovery),
++            ha_discovery_prefix=_env_str("HA_DISCOVERY_PREFIX", cls.ha_discovery_prefix)
++            or cls.ha_discovery_prefix,
++            device_name=_env_str("DEVICE_NAME", cls.device_name) or cls.device_name,
++        )
++
++
++# ---------------------------------------------------------------------------
++# Pure helpers (unit-tested)
++# ---------------------------------------------------------------------------
++
++
++@dataclass(frozen=True)
++class Command:
++    name: str  # "power" | "target_temperature" | "timer" | "unit"
++    value: Any
++
++
++def parse_bool(payload: str) -> bool:
++    p = payload.strip().lower()
++    if p in _TRUE:
++        return True
++    if p in _FALSE:
++        return False
++    raise ValueError(f"expected ON/OFF, got {payload!r}")
++
++
++def parse_command(suffix: str, payload: str, unit: str | None) -> Command:
++    """Validate an MQTT command. ``unit`` is the cooker's current unit, if known.
++
++    Raises ValueError with a human-readable reason on invalid input.
++    """
++    payload = payload.strip()
++    if suffix in ("power", "mode"):
++        return Command("power", parse_bool(payload))
++    if suffix == "target_temperature":
++        if unit is None:
++            raise ValueError("device unit not known yet; refusing to set a temperature")
+         try:
+-            self.mqtt_client.connect(self.mqtt_broker, self.mqtt_port, 60)
+-            self.mqtt_client.loop_start()
+-            logger.info(f"Connected to MQTT broker at {self.mqtt_broker}:{self.mqtt_port}")
+-        except (ConnectionRefusedError, OSError) as e:
+-            logger.error(f"Failed to connect to MQTT broker: {e}")
+-            raise
+-
+-    def on_mqtt_connect(self, client, userdata, flags, rc):
+-        """Callback when MQTT connects."""
+-        if rc == 0:
+-            logger.info("MQTT connected successfully")
+-        else:
+-            logger.error(f"MQTT connection failed with code: {rc}")
+-
+-    def on_mqtt_publish(self, client, userdata, mid):
+-        """Callback when message is published."""
+-        logger.debug(f"Message published: mid={mid}")
+-
+-    def on_mqtt_disconnect(self, client, userdata, rc):
+-        """Callback when MQTT disconnects."""
+-        logger.warning(f"MQTT disconnected with code: {rc}")
+-
+-    async def get_anova_device(self):
+-        """Discover and connect to Anova Nano device."""
+-        logger.info("Scanning for Anova Nano devices...")
+-
+-        # Create pyanova instance
+-        self.anova = Pyanova()
+-
+-        # Auto-discover devices
++            value = float(payload)
++        except ValueError:
++            raise ValueError(f"not a number: {payload!r}") from None
++        low, high = TEMPERATURE_RANGE[unit]
++        if not low <= value <= high:
++            raise ValueError(f"{value} °{unit} outside {low}-{high} °{unit}")
++        return Command("target_temperature", value)
++    if suffix == "timer":
+         try:
+-            devices = await self.anova.discover(timeout_seconds=self.scan_timeout)
+-        except (OSError, RuntimeError) as e:
+-            logger.error(f"Failed to scan for Anova devices: {e}")
+-            return False
+-
+-        if not devices:
+-            logger.warning("No Anova devices found during scan")
+-            return False
++            minutes = float(payload)
++        except ValueError:
++            raise ValueError(f"not a number: {payload!r}") from None
++        if not minutes.is_integer() or not 0 <= minutes <= TIMER_MAX_MINUTES:
++            raise ValueError(
++                f"timer must be whole minutes 0-{TIMER_MAX_MINUTES}, got {payload!r}"
++            )
++        return Command("timer", int(minutes))
++    if suffix == "unit":
++        u = payload.upper()
++        if u not in ("C", "F"):
++            raise ValueError(f"unit must be C or F, got {payload!r}")
++        return Command("unit", u)
++    raise ValueError(f"unknown command {suffix!r}")
++
++
++def build_state(
++    sensors: SensorValues, target_temperature: float, timer: int, unit: str
++) -> dict[str, Any]:
++    """Device state as published on <prefix>/state.
++
++    Contains every field of pyanova-nano's SensorValues, plus the setpoint
++    (get_target_temperature, in ``unit``), the timer (get_timer, minutes), the
++    display unit (get_unit) and the run status (get_status).
++    """
++    state: dict[str, Any] = dataclasses.asdict(sensors)
++    running = sensors.motor_speed != 0  # PyAnova.get_status()
++    state.update(
++        target_temperature=target_temperature,
++        unit=unit,
++        timer=timer,
++        running=running,
++        status="running" if running else "stopped",
++    )
++    return state
++
++
++def discovery_messages(
++    cfg: Config, address: str, state: dict[str, Any], info: dict[str, Any]
++) -> dict[str, dict]:
++    """Home Assistant MQTT discovery configs, keyed by config topic."""
++    node = "anova_nano_" + address.replace(":", "").lower()
++    p = cfg.topic_prefix
++    unit = state.get("unit", "C")
++    low, high = TEMPERATURE_RANGE.get(unit, TEMPERATURE_RANGE["C"])
++    device = {
++        "identifiers": [node],
++        "connections": [["bluetooth", address]],
++        "name": cfg.device_name,
++        "manufacturer": "Anova",
++        "model": "Nano",
++    }
++    if info.get("firmware_version"):
++        device["sw_version"] = info["firmware_version"]
++    common = {
++        "availability_topic": f"{p}/availability",
++        "device": device,
++    }
++
++    def topic(component: str, key: str) -> str:
++        return f"{cfg.ha_discovery_prefix}/{component}/{node}/{key}/config"
++
++    def entity(key: str, name: str | None, **extra: Any) -> dict[str, Any]:
++        return {**common, "name": name, "unique_id": f"{node}_{key}", **extra}
++
++    def temp_sensor(key: str, name: str, diagnostic: bool) -> dict[str, Any]:
++        cfg_ = entity(
++            key,
++            name,
++            state_topic=f"{p}/state",
++            value_template=f"{{{{ value_json.{key} }}}}",
++            device_class="temperature",
++            state_class="measurement",
++            unit_of_measurement="°" + state.get(f"{key}_units", unit),
++            suggested_display_precision=1,
++        )
++        if diagnostic:
++            cfg_["entity_category"] = "diagnostic"
++        return cfg_
++
++    msgs: dict[str, dict] = {
++        topic("climate", "climate"): entity(
++            "climate",
++            None,  # use the device name
++            modes=["off", "heat"],
++            mode_command_topic=f"{p}/set/mode",
++            mode_state_topic=f"{p}/state",
++            mode_state_template="{{ 'heat' if value_json.running else 'off' }}",
++            action_topic=f"{p}/state",
++            action_template="{{ 'heating' if value_json.running else 'off' }}",
++            temperature_command_topic=f"{p}/set/target_temperature",
++            temperature_state_topic=f"{p}/state",
++            temperature_state_template="{{ value_json.target_temperature }}",
++            current_temperature_topic=f"{p}/state",
++            current_temperature_template="{{ value_json.water_temp }}",
++            temperature_unit=unit,
++            min_temp=low,
++            max_temp=high,
++            temp_step=0.1,
++            precision=0.1,
++        ),
++        topic("switch", "cooking"): entity(
++            "cooking",
++            "Cooking",
++            icon="mdi:pot-steam",
++            command_topic=f"{p}/set/power",
++            state_topic=f"{p}/state",
++            value_template="{{ 'ON' if value_json.running else 'OFF' }}",
++        ),
++        topic("sensor", "water_temp"): temp_sensor(
++            "water_temp", "Water temperature", False
++        ),
++        topic("sensor", "heater_temp"): temp_sensor(
++            "heater_temp", "Heater temperature", True
++        ),
++        topic("sensor", "triac_temp"): temp_sensor(
++            "triac_temp", "Triac temperature", True
++        ),
++        topic("sensor", "internal_temp"): temp_sensor(
++            "internal_temp", "Internal temperature", True
++        ),
++        topic("sensor", "motor_speed"): entity(
++            "motor_speed",
++            "Motor speed",
++            icon="mdi:fan",
++            state_topic=f"{p}/state",
++            value_template="{{ value_json.motor_speed }}",
++            state_class="measurement",
++            entity_category="diagnostic",
++        ),
++        topic("sensor", "timer"): entity(
++            "timer",
++            "Timer remaining",
++            icon="mdi:timer-outline",
++            state_topic=f"{p}/state",
++            value_template="{{ value_json.timer }}",
++            device_class="duration",
++            unit_of_measurement="min",
++        ),
++        topic("binary_sensor", "water_low"): entity(
++            "water_low",
++            "Water low",
++            device_class="problem",
++            state_topic=f"{p}/state",
++            value_template="{{ 'ON' if value_json.water_low else 'OFF' }}",
++        ),
++        topic("binary_sensor", "water_leak"): entity(
++            "water_leak",
++            "Water leak",
++            device_class="moisture",
++            state_topic=f"{p}/state",
++            value_template="{{ 'ON' if value_json.water_leak else 'OFF' }}",
++        ),
++        topic("number", "timer_set"): entity(
++            "timer_set",
++            "Cooking timer",
++            icon="mdi:timer-cog-outline",
++            command_topic=f"{p}/set/timer",
++            state_topic=f"{p}/state",
++            value_template="{{ value_json.timer }}",
++            min=0,
++            max=TIMER_MAX_MINUTES,
++            step=1,
++            mode="box",
++            unit_of_measurement="min",
++        ),
++        topic("select", "unit"): entity(
++            "unit",
++            "Display unit",
++            icon="mdi:thermometer",
++            command_topic=f"{p}/set/unit",
++            state_topic=f"{p}/state",
++            value_template="{{ value_json.unit }}",
++            options=["C", "F"],
++            entity_category="config",
++        ),
++    }
++    return msgs
++
++
++# ---------------------------------------------------------------------------
++# Bridge
++# ---------------------------------------------------------------------------
++
++
++class DeviceDisconnected(Exception):
++    """The BLE link dropped during a session."""
+ 
+-        # Use the first device found
+-        device = devices[0]
+-        self.device_address = device.address
+-        logger.info(f"Found Anova device: {device.address}")
+ 
+-        # Connect to the device
++class AnovaMQTTBridge:
++    def __init__(
++        self,
++        config: Config,
++        mqtt_client: mqtt.Client | None = None,
++        anova_factory: Callable[[], PyAnova] | None = None,
++        find_device: Callable[[Config, PyAnova], Any] | None = None,
++    ) -> None:
++        self.cfg = config
++        self.mqtt = mqtt_client or mqtt.Client(
++            callback_api_version=CallbackAPIVersion.VERSION2,
++            client_id=config.mqtt_client_id,
++        )
++        self._anova_factory = anova_factory or PyAnova
++        self._find_device = find_device or _find_device
++        self._loop: asyncio.AbstractEventLoop | None = None
++        self._commands: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
++        self._stop = asyncio.Event()
++        self._online = False
++        self._address: str | None = None
++        self._state: dict[str, Any] = {}
++        self._info: dict[str, Any] = {}
++        self._discovery_signature: str | None = None
++
++    # ---- topics ----
++    def t(self, suffix: str) -> str:
++        return f"{self.cfg.topic_prefix}/{suffix}"
++
++    # ---- MQTT ----
++    def setup_mqtt(self) -> None:
++        self.mqtt.on_connect = self._on_mqtt_connect
++        self.mqtt.on_disconnect = self._on_mqtt_disconnect
++        self.mqtt.on_message = self._on_mqtt_message
++        if self.cfg.mqtt_user:
++            self.mqtt.username_pw_set(self.cfg.mqtt_user, self.cfg.mqtt_password)
++        self.mqtt.will_set(self.t("availability"), "offline", qos=1, retain=True)
++        self.mqtt.reconnect_delay_set(min_delay=1, max_delay=60)
++        # connect_async + loop_start: paho keeps retrying if the broker isn't up yet.
++        self.mqtt.connect_async(self.cfg.mqtt_broker, self.cfg.mqtt_port, keepalive=60)
++        self.mqtt.loop_start()
++        logger.info(
++            "Connecting to MQTT broker %s:%s", self.cfg.mqtt_broker, self.cfg.mqtt_port
++        )
++
++    def _on_mqtt_connect(
++        self, client, userdata, flags, reason_code, properties
++    ) -> None:
++        if reason_code.is_failure:
++            logger.error("MQTT connection refused: %s", reason_code)
++            return
++        logger.info("MQTT connected")
++        client.subscribe(self.t("set/+"), qos=1)
++        if self.cfg.ha_discovery:
++            client.subscribe(f"{self.cfg.ha_discovery_prefix}/status", qos=1)
++        # Re-assert retained topics after a broker restart.
++        self._threadsafe(self._republish)
++
++    def _on_mqtt_disconnect(
++        self, client, userdata, flags, reason_code, properties
++    ) -> None:
++        if reason_code.is_failure:
++            logger.warning("MQTT disconnected: %s (paho will reconnect)", reason_code)
++
++    def _on_mqtt_message(self, client, userdata, msg) -> None:
++        payload = msg.payload.decode("utf-8", errors="replace")
++        if msg.topic == f"{self.cfg.ha_discovery_prefix}/status":
++            if payload == "online":  # Home Assistant restarted
++                self._threadsafe(self._republish)
++            return
++        prefix = self.t("set/")
++        if msg.topic.startswith(prefix):
++            item = (msg.topic[len(prefix) :], payload)
++            self._threadsafe(lambda: self._commands.put_nowait(item))
++
++    def _threadsafe(self, fn: Callable[[], Any]) -> None:
++        """Run fn on the asyncio loop (paho callbacks run on paho's thread)."""
++        if self._loop is not None and not self._loop.is_closed():
++            self._loop.call_soon_threadsafe(fn)
++
++    def _publish_json(self, suffix: str, data: dict[str, Any]) -> None:
++        self.mqtt.publish(
++            self.t(suffix), json.dumps(data, separators=(",", ":")), qos=0, retain=True
++        )
++
++    def _set_online(self, online: bool) -> None:
++        self._online = online
++        self.mqtt.publish(
++            self.t("availability"),
++            "online" if online else "offline",
++            qos=1,
++            retain=True,
++        )
++
++    def _republish(self) -> None:
++        self._set_online(self._online)
++        if self._info:
++            self._publish_json("info", self._info)
++        if self._state:
++            self._publish_json("state", self._state)
++        self._discovery_signature = None
++        self._publish_discovery()
++
++    def _publish_discovery(self) -> None:
++        if not (self.cfg.ha_discovery and self._address and self._state):
++            return
++        msgs = discovery_messages(self.cfg, self._address, self._state, self._info)
++        signature = json.dumps(msgs, sort_keys=True)
++        if signature == self._discovery_signature:
++            return  # unchanged (e.g. units didn't change)
++        for topic, payload in msgs.items():
++            self.mqtt.publish(topic, json.dumps(payload), qos=1, retain=True)
++        self._discovery_signature = signature
++        logger.info("Published Home Assistant discovery (%d entities)", len(msgs))
++
++    # ---- BLE session ----
++    async def run(self) -> None:
++        self._loop = asyncio.get_running_loop()
++        self.setup_mqtt()
++        delay = self.cfg.reconnect_min
+         try:
+-            await self.anova.connect(device=device)
+-            logger.info(f"Connected to Anova Nano at {device.address}")
+-            return True
+-        except (OSError, RuntimeError) as e:
+-            logger.error(f"Failed to connect to Anova device: {e}")
+-            return False
+-
+-    def publish_status(self, status_data: dict):
+-        """Publish device status to MQTT."""
+-        topic = f"{self.mqtt_topic_prefix}/status"
+-        payload = str(status_data)
+-        self.mqtt_client.publish(topic, payload)
+-        logger.info(f"Published status to {topic}: {payload}")
+-
+-    def publish_temperature(self, temp_data: dict):
+-        """Publish temperature reading to MQTT."""
+-        topic = f"{self.mqtt_topic_prefix}/temperature"
+-        payload = str(temp_data)
+-        self.mqtt_client.publish(topic, payload)
+-        logger.info(f"Published temperature to {topic}: {payload}")
+-
+-    def publish_power(self, power_data: dict):
+-        """Publish power state to MQTT."""
+-        topic = f"{self.mqtt_topic_prefix}/power"
+-        payload = str(power_data)
+-        self.mqtt_client.publish(topic, payload)
+-        logger.info(f"Published power state to {topic}: {payload}")
+-
+-    def publish_alert(self, alert_data: dict):
+-        """Publish alert/warning to MQTT."""
+-        topic = f"{self.mqtt_topic_prefix}/alert"
+-        payload = str(alert_data)
+-        self.mqtt_client.publish(topic, payload)
+-        logger.info(f"Published alert to {topic}: {payload}")
+-
+-    async def read_loop(self):
+-        """Main read loop - continuously read from Anova Nano and publish to MQTT."""
+-        logger.info("Starting read loop...")
+-        logger.debug("Read loop started, entering while loop")
+-
+-        while self.running:
++            while not self._stop.is_set():
++                try:
++                    await self._session()
++                    delay = self.cfg.reconnect_min  # clean session end: reset backoff
++                except asyncio.CancelledError:
++                    raise
++                except (
++                    Exception
++                ) as exc:  # keep the daemon alive on any BLE/protocol error
++                    logger.warning("BLE session ended: %s: %s", type(exc).__name__, exc)
++                    logger.debug("Session error", exc_info=True)
++                if self._stop.is_set():
++                    break
++                logger.info("Reconnecting in %.0f s", delay)
++                with contextlib.suppress(TimeoutError):
++                    await asyncio.wait_for(self._stop.wait(), timeout=delay)
++                delay = min(delay * 2, self.cfg.reconnect_max)
++        finally:
++            self._set_online(False)
++            self.mqtt.loop_stop()
++            self.mqtt.disconnect()
++            logger.info("Bridge stopped")
++
++    def stop(self) -> None:
++        self._stop.set()
++
++    async def _session(self) -> None:
++        anova = self._anova_factory()
++        device = await self._find_device(self.cfg, anova)
++        if device is None:
++            raise RuntimeError("Anova Nano not found")
++        logger.info(
++            "Connecting to %s (%s)", device.address, getattr(device, "name", None)
++        )
++        await anova.connect(device=device)
++
++        disconnected = asyncio.Event()
++        unsubscribe = anova.add_on_disconnect(
++            lambda: self._threadsafe(disconnected.set)
++        )
++        self._address = device.address
++        try:
++            await self._read_info(anova)
++            await self._refresh(anova)
++            self._drop_stale_commands()
++            self._set_online(True)
++            self._publish_discovery()
++            logger.info("Bridge online for %s", device.address)
++            await self._serve(anova, disconnected)
++        finally:
++            self._set_online(False)
++            unsubscribe()
++            with contextlib.suppress(Exception):
++                await anova.disconnect()
++
++    async def _serve(self, anova: PyAnova, disconnected: asyncio.Event) -> None:
++        loop = asyncio.get_running_loop()
++        next_poll = loop.time() + self.cfg.poll_interval
++        while not self._stop.is_set():
++            if disconnected.is_set() or not anova.is_connected():
++                raise DeviceDisconnected("BLE link lost")
++            timeout = max(0.0, min(next_poll - loop.time(), 1.0))
+             try:
+-                # Get current status
+-                status = await self.anova.get_status()
+-                logger.info("Status details: temperature=%s, power=%s, is_cooking=%s" % (getattr(status, "temperature", "N/A"), getattr(status, "power", "N/A"), getattr(status, "is_cooking", "N/A")))
+-                logger.debug(f"Status type: {type(status)}")
+-                logger.debug(f"Status dir: {[attr for attr in dir(status) if not attr.startswith("_")]}")
+-                logger.debug(f"Status dict: {status.__dict__ if hasattr(status, "__dict__") else "No __dict__"}")
+-                logger.info(f"Status details: temperature={getattr(status, "temperature", "N/A"), power={getattr(status, "power", "N/A")}, is_cooking={getattr(status, "is_cooking", "N/A")}")
+-                # Publish various data points
+-                if hasattr(status, "temperature"):
+-                    self.publish_temperature(
+-                        {"temperature": status.temperature, "unit": "celsius"}
+-                    )
+-
+-                if hasattr(status, "power"):
+-                    self.publish_power(
+-                        {"power": status.power, "is_cooking": status.is_cooking}
+-                    )
+-
+-                if hasattr(status, "target_temperature"):
+-                    # Publish target/temp setpoint
+-                    pass  # Could publish target temperature
+-
+-                # Small delay between reads
+-                await asyncio.sleep(5)
+-
+-            except (OSError, RuntimeError) as e:
+-                logger.error(f"Error in read loop: {e}")
+-                await asyncio.sleep(2)  # Back off before retry
+-
+-    async def run(self):
+-        """Run the bridge service."""
+-        self.running = True
+-
+-        # Setup MQTT
+-        self.setup_mqtt()
+-
+-        # Connect to Anova Nano
+-        if not await self.get_anova_device():
+-            logger.error("Failed to connect to Anova Nano. Exiting.")
++                suffix, payload = await asyncio.wait_for(
++                    self._commands.get(), timeout=timeout
++                )
++            except TimeoutError:
++                if loop.time() >= next_poll:
++                    await self._refresh(anova)
++                    next_poll = loop.time() + self.cfg.poll_interval
++                continue
++            await self._handle_command(anova, suffix, payload)
++            await self._refresh(anova)
++            next_poll = loop.time() + self.cfg.poll_interval
++
++    def _drop_stale_commands(self) -> None:
++        """Commands that arrived while the cooker was unreachable are not replayed.
++
++        Executing a 'start' hours after it was sent would be surprising and unsafe.
++        """
++        dropped = 0
++        while not self._commands.empty():
++            self._commands.get_nowait()
++            dropped += 1
++        if dropped:
++            logger.warning(
++                "Dropped %d command(s) received while the cooker was offline", dropped
++            )
++
++    async def _handle_command(self, anova: PyAnova, suffix: str, payload: str) -> None:
++        try:
++            cmd = parse_command(suffix, payload, self._state.get("unit"))
++        except ValueError as exc:
++            logger.warning("Rejected %s=%r: %s", self.t(f"set/{suffix}"), payload, exc)
+             return
+-
+-        # Start the read loop
++        logger.info("Command %s=%r", cmd.name, cmd.value)
++        if cmd.name == "power":
++            await (anova.start() if cmd.value else anova.stop())
++        elif cmd.name == "target_temperature":
++            await anova.set_target_temperature(cmd.value)
++        elif cmd.name == "timer":
++            await anova.set_timer(cmd.value)
++        elif cmd.name == "unit":
++            await anova.set_unit(cmd.value)
++
++    async def _refresh(self, anova: PyAnova) -> None:
++        sensors = await anova.get_sensor_values()
++        target = await anova.get_target_temperature()
++        timer = await anova.get_timer()
++        unit = await anova.get_unit()
++        self._state = build_state(sensors, target, timer, unit)
++        self._publish_json("state", self._state)
++        logger.debug("State: %s", self._state)
++        self._publish_discovery()  # no-op unless units changed
++
++    async def _read_info(self, anova: PyAnova) -> None:
++        info: dict[str, Any] = {"address": self._address}
+         try:
+-            await self.read_loop()
+-        except KeyboardInterrupt:
+-            logger.info("Received KeyboardInterrupt, shutting down...")
+-        finally:
+-            self.running = False
+-            if self.anova:
+-                await self.anova.disconnect()
+-            self.mqtt_client.loop_stop()
+-            self.mqtt_client.disconnect()
+-            logger.info("Bridge shutdown complete")
+-
+-
+-def main():
+-    """Main entry point."""
+-    bridge = AnovaMQTTBridge()
+-    try:
+-        asyncio.run(bridge.run())
+-    except KeyboardInterrupt:
+-        logger.info("Exiting...")
++            fw = await anova.send_read_command(ReadCommands.GetFirmwareInfo)
++            info.update(
++                firmware_version=fw.tagId,
++                firmware_commit=fw.commitId,
++                firmware_date=fw.dateCode,
++            )
++        except Exception as exc:  # noqa: BLE001 - info is best-effort; never fail the session over it
++            logger.warning("Could not read firmware info: %s", exc)
++        try:
++            dev = await anova.get_device_info()
++            info["device_info"] = (
++                dev.value
++            )  # raw IntegerValue; meaning undocumented upstream
++        except Exception as exc:  # noqa: BLE001 - info is best-effort; never fail the session over it
++            logger.warning("Could not read device info: %s", exc)
++        self._info = info
++        self._publish_json("info", info)
++
++
++async def _find_device(cfg: Config, anova: PyAnova):
++    if cfg.device_address:
++        from bleak import BleakScanner
++
++        logger.info("Looking for %s...", cfg.device_address)
++        return await BleakScanner.find_device_by_address(
++            cfg.device_address, timeout=cfg.scan_timeout
++        )
++    logger.info("Scanning for an Anova Nano (%.0f s)...", cfg.scan_timeout)
++    devices = await anova.discover(timeout_seconds=cfg.scan_timeout)
++    if len(devices) > 1:
++        logger.warning(
++            "Found %d Anova Nanos (%s); using %s. Set DEVICE_ADDRESS to choose.",
++            len(devices),
++            ", ".join(d.address for d in devices),
++            devices[0].address,
++        )
++    return devices[0] if devices else None
++
++
++def main() -> None:
++    logging.basicConfig(
++        level=os.environ.get("LOG_LEVEL", "INFO").upper(),
++        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
++        stream=sys.stdout,
++    )
++    bridge = AnovaMQTTBridge(Config.from_env())
++
++    async def _main() -> None:
++        import signal
++
++        loop = asyncio.get_running_loop()
++        for sig in (signal.SIGINT, signal.SIGTERM):
++            with contextlib.suppress(NotImplementedError):
++                loop.add_signal_handler(sig, bridge.stop)
++        await bridge.run()
++
++    asyncio.run(_main())
+ 
+ 
+ if __name__ == "__main__":
+-    main()
+\ No newline at end of file
++    main()
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 097826c..314b402 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -1,5 +1,3 @@
+-version: "3.8"
+-
+ services:
+   mqtt-broker:
+     image: eclipse-mosquitto:2
+@@ -9,27 +7,26 @@ services:
+     volumes:
+       - ./mosquitto/config:/mosquitto/config
+       - ./mosquitto/data:/mosquitto/data
+-      - ./mosquitto/log:/mosquitto/log
+     restart: unless-stopped
+ 
+   anova-nano-bridge:
+     build: .
++    # or: image: ghcr.io/guykh/anova-nano-to-mqtt:latest
+     container_name: anova-nano-bridge
+     depends_on:
+       - mqtt-broker
+     environment:
+-      - MQTT_BROKER=mqtt-broker
+-      - MQTT_PORT=1883
+-      - MQTT_USER=
+-      - MQTT_PASSWORD=
+-      - MQTT_TOPIC_PREFIX=anova/nano
+-      - SCAN_TIMEOUT=5
++      MQTT_BROKER: mqtt-broker
++      MQTT_PORT: "1883"
++      MQTT_USER: ""
++      MQTT_PASSWORD: ""
++      MQTT_TOPIC_PREFIX: anova/nano
++      # DEVICE_ADDRESS: "AA:BB:CC:DD:EE:FF"   # recommended once you know it
++      SCAN_TIMEOUT: "10"
++      POLL_INTERVAL: "30"
++      HA_DISCOVERY: "true"
++      LOG_LEVEL: INFO
++    volumes:
++      # bleak uses the host's BlueZ over the system D-Bus.
++      - /var/run/dbus:/var/run/dbus
+     restart: unless-stopped
+-    # Bluetooth access for BLE - add host's Bluetooth group to container
+-    group_add:
+-      - bluetooth
+-    # Alternative options if group_add doesn't work on your system:
+-    # privileged: true  # Less secure, not recommended
+-    # devices:
+-    #   - "/dev/rfcomm0:/dev/rfcomm0"  # Direct device access
+-    #   - "/var/run/dbus:/var/run/dbus"  # DBus access for BlueZ
+\ No newline at end of file
+diff --git a/mosquitto/config/mosquitto.conf b/mosquitto/config/mosquitto.conf
+index 02f9687..e9eafc8 100644
+--- a/mosquitto/config/mosquitto.conf
++++ b/mosquitto/config/mosquitto.conf
+@@ -1,29 +1,15 @@
+-# Mosquitto MQTT Broker Configuration for anova-nano-to-mqtt
++# Mosquitto 2.x config for anova-nano-to-mqtt.
++listener 1883 0.0.0.0
+ 
+-# Listen on all interfaces
+-listener 1883
+-
+-# Set port
+-port 1883
+-
+-# Bind to all interfaces
+-bind_address 0.0.0.0
+-
+-# Enable anonymous access (no password required)
++# Anonymous access is convenient on a trusted LAN. For anything else, set
++# allow_anonymous false and configure password_file (see mosquitto_passwd).
+ allow_anonymous true
+ 
+-# Log destinations
+-log_type all
+-log_output file
+-
+-# Log file
+-log_file /mosquitto/log/mosquitto.log
+-
+-# PID file
+-pid_file /mosquitto/log/mosquitto.pid
+-
+-# Maximum packet size
+-max_packet_size 1048576
++persistence true
++persistence_location /mosquitto/data/
+ 
+-# Connection rate limiting
+-max_connections 100
+\ No newline at end of file
++log_dest stdout
++log_type error
++log_type warning
++log_type notice
++log_type information
+diff --git a/pyproject.toml b/pyproject.toml
+index 1e65cfb..8217b3b 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,19 +1,34 @@
+ [project]
+ name = "anova-nano-to-mqtt"
+-version = "0.1.0"
+-description = "Bridge Anova Nano BLE events to MQTT"
++version = "0.2.0"
++description = "Bridge an Anova Nano sous vide cooker (BLE) to MQTT, with Home Assistant discovery"
+ readme = "README.md"
+ requires-python = ">=3.11"
+ dependencies = [
+-    "pyanova-nano>=0.1.0",
+-    "paho-mqtt>=2.0.0",
++    "pyanova-nano>=0.3.5,<0.4",
++    "paho-mqtt>=2.1,<3",
+ ]
+ 
+ [project.optional-dependencies]
+-dev = [
+-    "pytest>=8.0.0",
+-]
++dev = ["pytest>=8", "ruff", "mypy"]
++
++[project.scripts]
++anova-nano-to-mqtt = "anova_mqtt_service:main"
+ 
+ [build-system]
+ requires = ["hatchling"]
+ build-backend = "hatchling.build"
++
++[tool.hatch.build.targets.wheel]
++only-include = ["anova_mqtt_service.py"]
++
++[tool.pytest.ini_options]
++pythonpath = ["."]
++testpaths = ["tests"]
++
++[tool.ruff]
++target-version = "py311"
++
++[tool.mypy]
++python_version = "3.11"
++ignore_missing_imports = true
+diff --git a/requirements.txt b/requirements.txt
+index 1b50f79..7e6f068 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,2 +1,3 @@
+-pyanova-nano
+-paho-mqtt
+\ No newline at end of file
++# Runtime pins for the Docker image (kept current by Renovate).
++pyanova-nano==0.3.5
++paho-mqtt==2.1.0
+diff --git a/tests/__pycache__/test_service.cpython-314-pytest-9.1.1.pyc b/tests/__pycache__/test_service.cpython-314-pytest-9.1.1.pyc
+deleted file mode 100644
+index 030bd1c7ca004494beca402257215fd85552b909..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 8183
+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
+R5?&V`MM<RRAtPCD{|0ftN5KF9
+
+diff --git a/tests/test_service.py b/tests/test_service.py
+index 0e37f43..f124dbc 100644
+--- a/tests/test_service.py
++++ b/tests/test_service.py
+@@ -1,90 +1,472 @@
+-"""Tests for anova-nano-to-mqtt service."""
++"""Tests for the Anova Nano MQTT bridge.
++
++The fake device implements the subset of pyanova_nano.PyAnova the bridge uses;
++test_fake_matches_pyanova_api() fails if those names drift from the real class.
++"""
++
++from __future__ import annotations
+ 
+ import asyncio
++import inspect
++import json
++from dataclasses import dataclass, field
++from types import SimpleNamespace
++from typing import Any
+ 
+-import paho.mqtt.client as mqtt
+ import pytest
++from pyanova_nano import PyAnova
++from pyanova_nano.types import ReadCommands, SensorValues
+ 
+-try:
+-    from pyanova_nano import PyAnova as Pyanova
+-except ImportError:
+-    # Fallback: try to import from pyanova module (in case of different packaging)
+-    try:
+-        from pyanova import PyAnova as Pyanova
+-    except ImportError:
+-        # Last resort: import modules and access the class
+-        import pyanova_nano
+-        Pyanova = pyanova_nano.PyAnova
+-
+-
+-def test_requirements_import():
+-    """Verify core dependencies are importable."""
+-    assert Pyanova is not None
+-    import paho.mqtt.client as mqtt_client
+-    assert mqtt_client is not None
+-
+-
+-def test_config_structure():
+-    """Verify configuration dictionary has expected keys."""
+-    config = {
+-        "mqtt": {
+-            "broker": "mqtt",
+-            "port": 1883,
+-            "topic_prefix": "anova/nano",
+-        },
+-        "scan": {
+-            "timeout": 5.0,
+-            "min_rssi": -100,
+-        },
++import anova_mqtt_service as svc
++from anova_mqtt_service import (
++    AnovaMQTTBridge,
++    Command,
++    Config,
++    build_state,
++    discovery_messages,
++    parse_command,
++)
++
++ADDRESS = "AA:BB:CC:DD:EE:FF"
++
++
++def sensors(**overrides: Any) -> SensorValues:
++    values: dict[str, Any] = {
++        "water_temp": 58.23,
++        "water_temp_units": "C",
++        "heater_temp": 61.1,
++        "heater_temp_units": "C",
++        "triac_temp": 45.12,
++        "triac_temp_units": "C",
++        "internal_temp": 35.05,
++        "internal_temp_units": "C",
++        "water_low": False,
++        "water_leak": False,
++        "motor_speed": 1800,
+     }
+-    assert "mqtt" in config
+-    assert "scan" in config
+-    assert config["mqtt"]["broker"] == "mqtt"
+-    assert config["mqtt"]["port"] == 1883
++    values.update(overrides)
++    return SensorValues(**values)
+ 
+ 
+-def test_mqtt_client_creation():
+-    """Verify MQTT client can be created and configured."""
+-    client = mqtt.Client()
+-    assert client is not None
+-    assert client._client_id is not None
++# ---------------------------------------------------------------------------
++# Fakes
++# ---------------------------------------------------------------------------
+ 
+ 
+-def test_pyanova_instantiation():
+-    """Verify pyanova can be instantiated."""
+-    # Create event loop for pyanova initialization
+-    loop = asyncio.new_event_loop()
+-    asyncio.set_event_loop(loop)
+-    try:
+-        pa = Pyanova(loop=loop)
+-        assert pa is not None
+-    finally:
+-        loop.close()
++@dataclass
++class FakeAnova:
++    """Stands in for PyAnova. Records calls; can simulate a BLE disconnect."""
++
++    sensor_values: SensorValues = field(default_factory=sensors)
++    target: float = 60.0
++    timer: int = 90
++    unit: str = "C"
++    fail_on: str | None = None
++    calls: list[tuple[str, Any]] = field(default_factory=list)
++    connected: bool = False
++    _disconnect_cbs: list = field(default_factory=list)
++
++    def _maybe_fail(self, name: str) -> None:
++        if self.fail_on == name:
++            raise TimeoutError(f"simulated {name} timeout")
++
++    async def connect(self, device=None, timeout_seconds=None):
++        self.calls.append(("connect", device.address))
++        self.connected = True
++
++    async def disconnect(self):
++        self.calls.append(("disconnect", None))
++        self.connected = False
++
++    def is_connected(self) -> bool:
++        return self.connected
++
++    def add_on_disconnect(self, cb):
++        self._disconnect_cbs.append(cb)
++        return lambda: self._disconnect_cbs.remove(cb)
++
++    def drop_link(self) -> None:
++        self.connected = False
++        for cb in list(self._disconnect_cbs):
++            cb()
++
++    async def get_sensor_values(self):
++        self._maybe_fail("get_sensor_values")
++        return self.sensor_values
++
++    async def get_target_temperature(self):
++        return self.target
++
++    async def get_timer(self):
++        return self.timer
++
++    async def get_unit(self):
++        return self.unit
++
++    async def start(self):
++        self.calls.append(("start", None))
++        self.sensor_values = sensors(motor_speed=1800)
++
++    async def stop(self):
++        self.calls.append(("stop", None))
++        self.sensor_values = sensors(motor_speed=0)
++
++    async def set_target_temperature(self, temperature: float):
++        self.calls.append(("set_target_temperature", temperature))
++        self.target = temperature
++
++    async def set_timer(self, time_minutes: int):
++        self.calls.append(("set_timer", time_minutes))
++        self.timer = time_minutes
++
++    async def set_unit(self, unit: str):
++        self.calls.append(("set_unit", unit))
++        self.unit = unit
++
++    async def send_read_command(self, command):
++        assert command == ReadCommands.GetFirmwareInfo
++        return SimpleNamespace(tagId="v1.2.3", commitId="abc123", dateCode=20240101)
+ 
++    async def get_device_info(self):
++        return SimpleNamespace(value=7)
+ 
+-# Integration-style test (requires actual Anova Nano device)
+-@pytest.mark.integration
+-def test_anova_nano_connection():
+-    """Test Anova Nano connection (requires device)."""
+-    # Create event loop for pyanova initialization
+-    loop = asyncio.new_event_loop()
+-    asyncio.set_event_loop(loop)
++
++class FakeMQTT:
++    """Minimal paho Client stand-in."""
++
++    def __init__(self) -> None:
++        self.published: list[tuple[str, str, int, bool]] = []
++        self.subscribed: list[str] = []
++        self.will: tuple | None = None
++        self.on_connect = self.on_disconnect = self.on_message = None
++
++    def username_pw_set(self, user, password):
++        self.credentials = (user, password)
++
++    def will_set(self, topic, payload, qos, retain):
++        self.will = (topic, payload, qos, retain)
++
++    def reconnect_delay_set(self, min_delay, max_delay):
++        pass
++
++    def connect_async(self, host, port, keepalive):
++        self.target = (host, port)
++
++    def loop_start(self):
++        pass
++
++    def loop_stop(self):
++        pass
++
++    def disconnect(self):
++        pass
++
++    def subscribe(self, topic, qos=0):
++        self.subscribed.append(topic)
++
++    def publish(self, topic, payload, qos=0, retain=False):
++        self.published.append((topic, payload, qos, retain))
++
++    # helpers
++    def last(self, topic: str) -> str | None:
++        for t, p, _, _ in reversed(self.published):
++            if t == topic:
++                return p
++        return None
++
++    def deliver(self, topic: str, payload: str) -> None:
++        self.on_message(
++            self, None, SimpleNamespace(topic=topic, payload=payload.encode())
++        )
++
++    def connack(self) -> None:
++        self.on_connect(self, None, None, SimpleNamespace(is_failure=False), None)
++
++
++def make_bridge(
++    anovas: list[FakeAnova], **cfg: Any
++) -> tuple[AnovaMQTTBridge, FakeMQTT]:
++    config = Config(
++        poll_interval=cfg.pop("poll_interval", 3600),
++        reconnect_min=0.01,
++        reconnect_max=0.02,
++        **cfg,
++    )
++    mqttc = FakeMQTT()
++    it = iter(anovas)
++
++    async def find(_cfg, _anova):
++        return SimpleNamespace(address=ADDRESS, name="Nano")
++
++    bridge = AnovaMQTTBridge(
++        config, mqtt_client=mqttc, anova_factory=lambda: next(it), find_device=find
++    )
++    return bridge, mqttc
++
++
++async def wait_for(predicate, timeout: float = 3.0) -> None:
++    loop = asyncio.get_running_loop()
++    end = loop.time() + timeout
++    while not predicate():
++        if loop.time() > end:
++            raise AssertionError("condition not met in time")
++        await asyncio.sleep(0.01)
++
++
++async def run_with(bridge: AnovaMQTTBridge, scenario) -> None:
++    task = asyncio.create_task(bridge.run())
+     try:
+-        pa = Pyanova(loop=loop)
+-        # This test requires an actual Anova Nano device
+-        # and will be skipped if no device is found
+-        try:
+-            devices = loop.run_until_complete(pa.discover(timeout_seconds=2.0))
+-        except Exception as e:
+-            # Check if the error is due to no Bluetooth adapter available
+-            msg = str(e).lower()
+-            if ("org.bluez was not provided" in msg or 
+-                "no bluetooth adapter" in msg or 
+-                "adapter not found" in msg or
+-                "service unknown" in msg):
+-                pytest.skip("No Bluetooth adapter available")
+-            else:
+-                raise
+-        assert len(devices) > 0, "No Anova devices found"
++        await scenario()
+     finally:
+-        loop.close()
+\ No newline at end of file
++        bridge.stop()
++        await asyncio.wait_for(task, timeout=5)
++
++
++# ---------------------------------------------------------------------------
++# API parity with pyanova-nano
++# ---------------------------------------------------------------------------
++
++
++def test_fake_matches_pyanova_api():
++    used = [
++        "connect",
++        "disconnect",
++        "is_connected",
++        "add_on_disconnect",
++        "get_sensor_values",
++        "get_target_temperature",
++        "get_timer",
++        "get_unit",
++        "start",
++        "stop",
++        "set_target_temperature",
++        "set_timer",
++        "set_unit",
++        "send_read_command",
++        "get_device_info",
++        "discover",
++    ]
++    for name in used:
++        assert hasattr(PyAnova, name), f"PyAnova has no {name}()"
++    # Parameter names the bridge relies on.
++    assert "device" in inspect.signature(PyAnova.connect).parameters
++    assert "timeout_seconds" in inspect.signature(PyAnova.discover).parameters
++    assert hasattr(ReadCommands, "GetFirmwareInfo")
++
++
++def test_build_state_has_every_sensorvalues_field():
++    sv = sensors(motor_speed=0, water_low=True)
++    state = build_state(sv, 60.5, 45, "C")
++    for f in SensorValues.__dataclass_fields__:
++        assert state[f] == getattr(sv, f)
++    assert state["target_temperature"] == 60.5
++    assert state["timer"] == 45
++    assert state["unit"] == "C"
++    # PyAnova.get_status(): running iff motor_speed != 0
++    assert state["running"] is False and state["status"] == "stopped"
++    assert build_state(sensors(motor_speed=1), 0, 0, "C")["status"] == "running"
++    json.dumps(state)  # must be JSON-serializable
++
++
++# ---------------------------------------------------------------------------
++# Command parsing
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.parametrize("payload", ["ON", "on", "true", "1", "start", "heat"])
++def test_power_on(payload):
++    assert parse_command("power", payload, "C") == Command("power", True)
++
++
++@pytest.mark.parametrize("payload", ["OFF", "false", "0", "stop", "off"])
++def test_power_off(payload):
++    assert parse_command("mode", payload, "C") == Command("power", False)
++
++
++def test_target_temperature_validated_in_device_unit():
++    assert parse_command("target_temperature", "57.5", "C") == Command(
++        "target_temperature", 57.5
++    )
++    assert parse_command("target_temperature", "135", "F") == Command(
++        "target_temperature", 135.0
++    )
++    with pytest.raises(ValueError):
++        parse_command("target_temperature", "135", "C")  # 135 °C is out of range
++    with pytest.raises(ValueError):
++        parse_command("target_temperature", "20", "F")
++    with pytest.raises(ValueError):
++        parse_command("target_temperature", "abc", "C")
++    with pytest.raises(ValueError, match="unit not known"):
++        parse_command("target_temperature", "60", None)
++
++
++def test_timer_and_unit():
++    assert parse_command("timer", "90", "C") == Command("timer", 90)
++    assert parse_command("timer", "0", "C") == Command("timer", 0)
++    for bad in ("-1", "1.5", "6000", "x"):
++        with pytest.raises(ValueError):
++            parse_command("timer", bad, "C")
++    assert parse_command("unit", "f", "C") == Command("unit", "F")
++    with pytest.raises(ValueError):
++        parse_command("unit", "K", "C")
++    with pytest.raises(ValueError):
++        parse_command("explode", "1", "C")
++
++
++# ---------------------------------------------------------------------------
++# Discovery
++# ---------------------------------------------------------------------------
++
++
++def test_discovery_payloads():
++    cfg = Config()
++    state = build_state(sensors(water_temp_units="F"), 140.0, 0, "F")
++    msgs = discovery_messages(cfg, ADDRESS, state, {"firmware_version": "v1"})
++    ids = [m["unique_id"] for m in msgs.values()]
++    assert len(ids) == len(set(ids))
++    climate = msgs["homeassistant/climate/anova_nano_aabbccddeeff/climate/config"]
++    assert climate["temperature_unit"] == "F"
++    assert (climate["min_temp"], climate["max_temp"]) == (32.0, 197.0)
++    assert climate["mode_command_topic"] == "anova/nano/set/mode"
++    assert climate["temperature_command_topic"] == "anova/nano/set/target_temperature"
++    assert climate["availability_topic"] == "anova/nano/availability"
++    assert climate["device"]["sw_version"] == "v1"
++    water = msgs["homeassistant/sensor/anova_nano_aabbccddeeff/water_temp/config"]
++    assert water["unit_of_measurement"] == "°F"
++    for payload in msgs.values():
++        json.dumps(payload)
++
++
++# ---------------------------------------------------------------------------
++# End-to-end with fakes
++# ---------------------------------------------------------------------------
++
++
++def test_mqtt_setup():
++    bridge, mqttc = make_bridge([], mqtt_user="u", mqtt_password="p")
++    bridge.setup_mqtt()
++    assert mqttc.will == ("anova/nano/availability", "offline", 1, True)
++    assert mqttc.credentials == ("u", "p")
++    mqttc.connack()
++    assert "anova/nano/set/+" in mqttc.subscribed
++    assert "homeassistant/status" in mqttc.subscribed
++
++
++def test_session_publishes_state_info_and_executes_commands():
++    async def main():
++        dev = FakeAnova()
++        bridge, mqttc = make_bridge([dev])
++
++        async def scenario():
++            await wait_for(lambda: mqttc.last("anova/nano/availability") == "online")
++            state = json.loads(mqttc.last("anova/nano/state"))
++            assert state["water_temp"] == 58.23 and state["running"] is True
++            info = json.loads(mqttc.last("anova/nano/info"))
++            assert info == {
++                "address": ADDRESS,
++                "firmware_version": "v1.2.3",
++                "firmware_commit": "abc123",
++                "firmware_date": 20240101,
++                "device_info": 7,
++            }
++            assert any(
++                t.startswith("homeassistant/climate/") for t, *_ in mqttc.published
++            )
++
++            mqttc.deliver("anova/nano/set/target_temperature", "57.5")
++            mqttc.deliver("anova/nano/set/timer", "120")
++            mqttc.deliver("anova/nano/set/power", "OFF")
++            mqttc.deliver("anova/nano/set/target_temperature", "500")  # rejected
++            await wait_for(lambda: ("stop", None) in dev.calls)
++            await wait_for(
++                lambda: (
++                    json.loads(mqttc.last("anova/nano/state"))["status"] == "stopped"
++                )
++            )
++            state = json.loads(mqttc.last("anova/nano/state"))
++            assert state["target_temperature"] == 57.5 and state["timer"] == 120
++            assert ("set_target_temperature", 500.0) not in dev.calls
++
++        await run_with(bridge, scenario)
++        assert mqttc.last("anova/nano/availability") == "offline"
++        assert ("disconnect", None) in dev.calls
++
++    asyncio.run(main())
++
++
++def test_reconnects_after_ble_drop_and_drops_stale_commands():
++    async def main():
++        first, second = FakeAnova(), FakeAnova()
++        bridge, mqttc = make_bridge([first, second])
++
++        async def scenario():
++            await wait_for(lambda: mqttc.last("anova/nano/availability") == "online")
++            first.drop_link()
++            await wait_for(lambda: mqttc.last("anova/nano/availability") == "offline")
++            # Arrives while offline: must not be replayed on the new connection.
++            mqttc.deliver("anova/nano/set/power", "ON")
++            await wait_for(lambda: ("connect", ADDRESS) in second.calls)
++            await wait_for(lambda: mqttc.last("anova/nano/availability") == "online")
++            await asyncio.sleep(0.05)
++            assert ("start", None) not in first.calls + second.calls
++
++        await run_with(bridge, scenario)
++
++    asyncio.run(main())
++
++
++def test_poll_failure_triggers_reconnect():
++    async def main():
++        flaky, good = FakeAnova(), FakeAnova()
++        bridge, mqttc = make_bridge([flaky, good], poll_interval=1.0)
++
++        async def scenario():
++            await wait_for(lambda: mqttc.last("anova/nano/availability") == "online")
++            flaky.fail_on = "get_sensor_values"
++            await wait_for(lambda: ("connect", ADDRESS) in good.calls, timeout=5)
++            await wait_for(lambda: mqttc.last("anova/nano/availability") == "online")
++
++        await run_with(bridge, scenario)
++
++    asyncio.run(main())
++
++
++def test_device_not_found_retries():
++    async def main():
++        attempts = 0
++        config = Config(reconnect_min=0.01, reconnect_max=0.02)
++        mqttc = FakeMQTT()
++
++        async def find(_cfg, _anova):
++            nonlocal attempts
++            attempts += 1
++
++        bridge = AnovaMQTTBridge(
++            config, mqtt_client=mqttc, anova_factory=FakeAnova, find_device=find
++        )
++
++        async def scenario():
++            await wait_for(lambda: attempts >= 3)
++
++        await run_with(bridge, scenario)
++        assert mqttc.last("anova/nano/availability") == "offline"
++
++    asyncio.run(main())
++
++
++def test_config_from_env(monkeypatch):
++    monkeypatch.setenv("MQTT_PORT", "nope")
++    monkeypatch.setenv("MQTT_TOPIC_PREFIX", "kitchen/anova/")
++    monkeypatch.setenv("POLL_INTERVAL", "10")
++    monkeypatch.setenv("HA_DISCOVERY", "false")
++    monkeypatch.setenv("MQTT_USER", "")
++    cfg = Config.from_env()
++    assert cfg.mqtt_port == 1883
++    assert cfg.topic_prefix == "kitchen/anova"
++    assert cfg.poll_interval == 10.0
++    assert cfg.ha_discovery is False
++    assert cfg.mqtt_user is None
++
++
++def test_module_entrypoint_exists():
++    assert callable(svc.main)

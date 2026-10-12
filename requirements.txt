@@ -1,2 +1,3 @@
-pyanova-nano
-paho-mqtt
+# Runtime pins for the Docker image (kept current by Renovate).
+pyanova-nano==0.3.5
+paho-mqtt==2.1.0

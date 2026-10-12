@@ -1,117 +1,123 @@
-# anova-nano-to-mqtt
+# anova-nano-mqtt-broker
 
-Docker service that sends Anova Nano BLE events to MQTT.
+Bridges an **Anova Nano** sous vide cooker (Bluetooth LE) to MQTT, with Home Assistant auto-discovery.
 
-## Overview
-
-This project bridges the Anova Nano sous vide cooker (via Bluetooth LE) with an MQTT broker,
-allowing you to receive Anova Nano events (temperature, power status, alerts) in any MQTT
-compatible system (Home Assistant, Node-RED, etc.).
-
-## Architecture
+All device communication goes through [pyanova-nano](https://github.com/filmkorn/pyanova-nano). This service only maps its API onto MQTT topics.
 
 ```
-Anova Nano (BLE) → Python Service → MQTT Broker → Consumers
+Anova Nano ⇄ BLE ⇄ host BlueZ ⇄ D-Bus ⇄ bridge (pyanova-nano) ⇄ MQTT ⇄ Home Assistant / Node-RED / …
 ```
 
-The Python service uses:
-- `pyanova-nano` for BLE communication with the Anova Nano
-- `paho-mqtt` for MQTT publishing
-- `blueZ` system libraries for Bluetooth access (included in Dockerfile)
-
-## MQTT Topics
-
-| Topic | Description |
-|-------|-------------|
-| `anova/nano/status` | General device status |
-| `anova/nano/temperature` | Current cooking temperature |
-| `anova/nano/power` | Power state and cooking status |
-| `anova/nano/alert` | Alerts and warnings |
-
-## Project Structure
-
-```
-anova-nano-to-mqtt/
-├── Dockerfile              # Python 3.12-slim with BlueZ
-├── requirements.txt        # pyanova-nano + paho-mqtt
-├── anova_mqtt_service.py   # Main bridge script
-├── docker-compose.yml      # Mosquitto + bridge services
-├── mosquitto/config/       # MQTT broker configuration
-└── README.md              # This file
-```
-
-## Usage
-
-### Start the services
+## Quick start
 
 ```bash
-cd anova-nano-to-mqtt
 docker compose up -d
-```
-
-### View logs
-
-```bash
 docker compose logs -f anova-nano-bridge
 ```
 
-### First run
+The Nano accepts only one BLE connection. Close the Anova app (or turn off Bluetooth on your phone) before starting the bridge.
 
-On first run, the service will scan for your Anova Nano device and connect via BLE.
-Ensure your Anova Nano is in pairing mode and within Bluetooth range.
+On first start the bridge scans for the cooker. Once you know its address (it's in the logs), set `DEVICE_ADDRESS` so the bridge connects directly.
+
+## MQTT topics
+
+With the default prefix `anova/nano`:
+
+| Topic | Direction | Payload |
+|---|---|---|
+| `anova/nano/availability` | out, retained | `online` / `offline` (also the MQTT last will) |
+| `anova/nano/state` | out, retained | JSON, see below |
+| `anova/nano/info` | out, retained | JSON: `address`, `firmware_version`, `firmware_commit`, `firmware_date`, `device_info` |
+| `anova/nano/set/power` | in | `ON` / `OFF` (also `start`/`stop`, `true`/`false`, `1`/`0`) |
+| `anova/nano/set/mode` | in | `heat` / `off` (Home Assistant climate) |
+| `anova/nano/set/target_temperature` | in | number, **in the cooker's current unit** (like `PyAnova.set_target_temperature`) |
+| `anova/nano/set/timer` | in | whole minutes, 0–5999 |
+| `anova/nano/set/unit` | in | `C` / `F` |
+
+Example `state` payload:
+
+```json
+{
+  "water_temp": 58.23, "water_temp_units": "C",
+  "heater_temp": 61.1, "heater_temp_units": "C",
+  "triac_temp": 45.12, "triac_temp_units": "C",
+  "internal_temp": 35.05, "internal_temp_units": "C",
+  "water_low": false, "water_leak": false, "motor_speed": 1800,
+  "target_temperature": 60.0, "unit": "C", "timer": 90,
+  "running": true, "status": "running"
+}
+```
+
+This contains every field of pyanova-nano's `SensorValues`, plus the results of `get_target_temperature()`, `get_unit()`, `get_timer()` and `get_status()`.
+
+Command handling:
+
+- Invalid commands (out-of-range temperature, bad payload) are rejected and logged, never sent to the cooker.
+- After each accepted command the state is refreshed immediately.
+- Commands that arrive while the cooker is offline are **dropped, not replayed**. A `start` should not fire hours later when the cooker comes back in range.
+
+## Home Assistant
+
+With `HA_DISCOVERY=true` (the default) the bridge publishes discovery configs for one device. That device has:
+
+- a climate entity (heat/off, target, current temperature)
+- a "Cooking" switch
+- water, heater, triac and internal temperature sensors, plus motor speed and timer remaining
+- water low and water leak binary sensors
+- a cooking timer number
+- a display unit select
+
+Discovery is re-sent when Home Assistant restarts (`homeassistant/status`) and whenever the cooker's unit changes.
 
 ## Configuration
 
-Edit `mosquitto/config/mosquitto.conf` to adjust MQTT settings (port, password, etc.).
+All configuration is via environment variables:
 
-## Bluetooth Access
+| Variable | Default | Description |
+|---|---|---|
+| `MQTT_BROKER` | `mqtt-broker` | Broker host |
+| `MQTT_PORT` | `1883` | Broker port |
+| `MQTT_USER` / `MQTT_PASSWORD` | unset | Credentials |
+| `MQTT_CLIENT_ID` | `anova-nano-bridge` | MQTT client id |
+| `MQTT_TOPIC_PREFIX` | `anova/nano` | Topic prefix |
+| `DEVICE_ADDRESS` | unset | BLE MAC of the cooker. If unset, the first Nano found is used |
+| `SCAN_TIMEOUT` | `10` | Seconds to scan / look for the device |
+| `POLL_INTERVAL` | `30` | Seconds between state polls (PyAnova's default) |
+| `RECONNECT_MIN` / `RECONNECT_MAX` | `5` / `300` | BLE reconnect backoff bounds, seconds |
+| `HA_DISCOVERY` | `true` | Publish Home Assistant discovery |
+| `HA_DISCOVERY_PREFIX` | `homeassistant` | Discovery prefix |
+| `DEVICE_NAME` | `Anova Nano` | Device name in Home Assistant |
+| `LOG_LEVEL` | `INFO` | `DEBUG` shows every state poll |
 
-The Dockerfile includes BlueZ for direct Bluetooth access. The docker-compose.yml is
-configured to automatically add the host's Bluetooth group to the container:
+## Bluetooth access
 
-```bash
-docker compose up -d
+bleak uses the **host's** BlueZ over the system D-Bus. The container needs two things:
+
+1. The host's D-Bus socket. `docker-compose.yml` mounts `/var/run/dbus`.
+2. Permission to talk to `org.bluez`. BlueZ's default D-Bus policy allows root and members of the host's `bluetooth` group, so the image runs as root. No `privileged` mode or device passthrough is needed.
+
+To run unprivileged instead, run the container as a host user that is in the `bluetooth` group. D-Bus checks group membership of the host uid. For example:
+
+```yaml
+    user: "1000:1000"   # a host user that is in the bluetooth group
 ```
 
-If your system doesn't support `group_add` in compose, you can use:
+The host needs a working Bluetooth adapter with `bluetoothd` running (`systemctl status bluetooth`).
+
+## Running without Docker
 
 ```bash
-# Alternative: Manual group addition
-docker compose run --rm --group-add bluetooth anova-nano-bridge
-
-# Or modify docker-compose.yml to add:
-# group_add:
-#   - bluetooth
+pip install .
+anova-nano-mqtt-broker          # or: python anova_mqtt_service.py
 ```
-
-**Note**: Ensure your user is in the `bluetooth` group on the host system for proper
-device access, or run with appropriate privileges.
-
-## Alternative: ESP32 BLE→MQTT Proxy
-
-If you prefer not to give Docker access to Bluetooth hardware, use an ESP32 running
-[Tasmota/ESPHome BLE proxy] to forward BLE advertisements to MQTT without BlueZ.
 
 ## Development
 
-### Running Locally (without Docker)
-
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Run the service
-python anova_mqtt_service.py
+pip install -r requirements.txt pytest ruff mypy
+ruff check . && ruff format --check .
+mypy anova_mqtt_service.py
+pytest -v
 ```
 
-### Testing
-
-Run the test suite:
-
-```bash
-pytest
-```
-
-## License
-
-MIT
+The tests run the bridge end to end against fake MQTT and BLE clients. They also check that every `PyAnova` method the bridge calls exists on the real class, so an upstream API change fails CI.

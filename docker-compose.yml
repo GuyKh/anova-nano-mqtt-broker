@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   mqtt-broker:
     image: eclipse-mosquitto:2
@@ -9,27 +7,28 @@ services:
     volumes:
       - ./mosquitto/config:/mosquitto/config
       - ./mosquitto/data:/mosquitto/data
-      - ./mosquitto/log:/mosquitto/log
     restart: unless-stopped
 
   anova-nano-bridge:
     build: .
+    # or: image: ghcr.io/guykh/anova-nano-to-mqtt:latest
     container_name: anova-nano-bridge
     depends_on:
       - mqtt-broker
     environment:
-      - MQTT_BROKER=mqtt-broker
-      - MQTT_PORT=1883
-      - MQTT_USER=
-      - MQTT_PASSWORD=
-      - MQTT_TOPIC_PREFIX=anova/nano
-      - SCAN_TIMEOUT=5
+      MQTT_BROKER: mqtt-broker
+      MQTT_PORT: "1883"
+      MQTT_USER: ""
+      MQTT_PASSWORD: ""
+      MQTT_TOPIC_PREFIX: anova/nano
+      # DEVICE_ADDRESS: "AA:BB:CC:DD:EE:FF"   # recommended once you know it
+      SCAN_TIMEOUT: "10"
+      POLL_INTERVAL: "30"
+      HA_DISCOVERY: "true"
+      LOG_LEVEL: INFO
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      # bleak uses the host's BlueZ over the system D-Bus.
+      - /var/run/dbus:/var/run/dbus
     restart: unless-stopped
-    # Bluetooth access for BLE - add host's Bluetooth group to container
-    group_add:
-      - bluetooth
-    # Alternative options if group_add doesn't work on your system:
-    # privileged: true  # Less secure, not recommended
-    # devices:
-    #   - "/dev/rfcomm0:/dev/rfcomm0"  # Direct device access
-    #   - "/var/run/dbus:/var/run/dbus"  # DBus access for BlueZ

@@ -2,36 +2,45 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.12"
-    
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pytest ruff mypy
-    
-    - name: Lint with ruff
-      run: |
-        ruff check .
-    
-    - name: Type check with mypy
-      run: |
-        mypy anova_mqtt_service.py --ignore-missing-imports
-    
-    - name: Run tests
-      run: |
-        PYTHONPATH=. pytest tests/ -v
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest ruff mypy
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Type check
+        run: mypy anova_mqtt_service.py
+      - name: Test
+        run: pytest -v
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: anova-nano-to-mqtt:ci
+          load: true
+      - name: Smoke test (module imports inside the image)
+        run: docker run --rm anova-nano-to-mqtt:ci python -c "import anova_mqtt_service"
